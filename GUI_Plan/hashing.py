@@ -1,343 +1,231 @@
-# hashing.py — SQLite-backed pHash lookup across ALL set tables
-# Loads from any table that contains: id, r_phash, g_phash, b_phash
-
-import os
+# hashing.py — SQLite-backed pHash matching with auto hash-size detection and RGB/single-column support
+from __future__ import annotations
 import sqlite3
-import logging
-from typing import List, Tuple, Optional, Any, Dict
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass
 
+from PIL import Image, ImageOps
 import imagehash
-from PIL import Image
 
-# Prefer shared DB helpers if available
-try:
-    from database import list_db_files, get_db_path, get_connection, DATA_DIR as _DB_DATA_DIR
-except Exception:  # pragma: no cover
-    list_db_files = None
-    get_db_path = None
-    get_connection = None
-    _DB_DATA_DIR = None
+# ---------------- State ----------------
+@dataclass
+class _HashState:
+    loaded: bool = False
+    count: int = 0
+    db_name: Optional[str] = None
+    # What columns we found
+    mode: str = "rgb"  # "rgb" or "single"
+    id_col: str = "id"
+    cols_rgb: Tuple[str, str, str] = ("r_phash", "g_phash", "b_phash")
+    col_single: str = "phash"
+    # Tables that matched the chosen mode
+    tables: List[str] = None
+    # For rgb mode: entries = [((table, id), rH, gH, bH)]
+    # For single mode: entries = [((table, id), h)]
+    entries: List[Tuple[Any, ...]] = None
+    # Detected hash size (e.g., 16 => 256-bit)
+    hash_n: int = 16
 
-from config import (
-    DB_DATA_DIR,
-    HASH_TABLE_CANDIDATES,
-    HASH_COLUMN_SETS,
-    HASH_ID_COLUMN_CANDIDATES,
-    DEFAULT_HASH_SIZE,
-)
+_STATE = _HashState(loaded=False, count=0, db_name=None, tables=[], entries=[], hash_n=16)
 
-logger = logging.getLogger(__name__)
+def get_status() -> Dict:
+    return dict(
+        loaded=_STATE.loaded,
+        count=_STATE.count,
+        db_name=_STATE.db_name,
+        mode=_STATE.mode,
+        tables=list(_STATE.tables or []),
+        id_col=_STATE.id_col,
+        cols_rgb=_STATE.cols_rgb if _STATE.mode == "rgb" else None,
+        col_single=_STATE.col_single if _STATE.mode == "single" else None,
+        hash_size=_STATE.hash_n,
+    )
 
-# ---------- Internal state ----------
-# Store (table, id, r_hash, g_hash, b_hash)
-PRECOMPUTED_HASHES: List[Tuple[str, Any, imagehash.ImageHash, imagehash.ImageHash, imagehash.ImageHash]] = []
-_LOADED_DB_NAME: Optional[str] = None
-_LOADED_TABLES: List[str] = []
-_LOADED_COLS: Optional[Tuple[str, str, str]] = None  # r,g,b column names (all tables share these)
-_LOADED_ID_COL: Optional[str] = None
-
-# Accept any table that has these columns
-RGB_COL_CHOICES = list(HASH_COLUMN_SETS) + [
-    ("r_phash", "g_phash", "b_phash"),
-    ("r_hash", "g_hash", "b_hash"),
-    ("r", "g", "b"),
-]
-ID_COL_CHOICES = list(dict.fromkeys(HASH_ID_COLUMN_CANDIDATES + ["id", "card_id", "uuid"]))
-
-
-
+# ---------------- SQLite helpers ----------------
 def _qident(name: str) -> str:
-    # Quote an identifier for SQLite (double quotes, escape embedded quotes)
     return '"' + str(name).replace('"', '""') + '"'
 
-# ---------- DB helpers ----------
-
-def _resolve_db_path(db_name: Optional[str]) -> Optional[str]:
-    """Resolve a DB filename to an absolute path inside ./data (or absolute if given)."""
-    forced = os.environ.get("HASH_DB_PATH")
-    if forced and os.path.exists(forced):
-        return forced
-
-    if db_name:
-        if os.path.isabs(db_name) and os.path.exists(db_name):
-            return db_name
-        data_dir = _DB_DATA_DIR or DB_DATA_DIR or os.path.join(os.path.dirname(__file__), "data")
-        return os.path.join(data_dir, db_name)
-
-    # Try selection from main_sqlite
-    try:
-        import main_sqlite  # type: ignore
-        sel = getattr(main_sqlite, 'SELECTED_DB_NAME', None)
-        if sel:
-            if os.path.isabs(sel) and os.path.exists(sel):
-                return sel
-            data_dir = _DB_DATA_DIR or DB_DATA_DIR or os.path.join(os.path.dirname(__file__), "data")
-            cand = os.path.join(data_dir, sel)
-            if os.path.exists(cand):
-                return cand
-    except Exception:
-        pass
-
-    if get_db_path:
-        try:
-            p = get_db_path(None)
-            if p and os.path.exists(p):
-                return p
-        except Exception:
-            pass
-
-    data_dir = _DB_DATA_DIR or DB_DATA_DIR or os.path.join(os.path.dirname(__file__), "data")
-    if os.path.isdir(data_dir):
-        dbs = [f for f in os.listdir(data_dir) if f.lower().endswith(".db")]
-        if dbs:
-            return os.path.join(data_dir, dbs[0])
-
-    logger.warning("hashing: no .db found or path invalid")
-    return None
-
-
-def _open_conn(db_path: str) -> sqlite3.Connection:
-    if get_connection:
-        try:
-            return get_connection(os.path.basename(db_path))
-        except Exception:
-            pass
-    conn = sqlite3.connect(db_path)
-    # Do not rely on row_factory; we'll use cursor.description to be robust.
-    return conn
-
-
-def _list_tables(conn: sqlite3.Connection) -> List[str]:
+def _table_columns(conn: sqlite3.Connection, table: str):
     cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    return [r[0] for r in cur.fetchall()]
-
-
-def _table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
-    cur = conn.cursor()
-    try:
-        cur.execute(f"PRAGMA table_info({_qident.__name__}(table))")
-    except Exception:
-        # Fallback to raw quoting
-        cur.execute(f'PRAGMA table_info("{table}")')
+    cur.execute(f'PRAGMA table_info({_qident(table)})')
     return [r[1] for r in cur.fetchall()]
 
+def _candidate_tables(conn: sqlite3.Connection) -> List[str]:
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    return [r[0] for r in cur.fetchall()]
 
-def _to_hash(value: Any) -> Optional[imagehash.ImageHash]:
-    if value is None:
+def _parse_hash(val) -> Optional[imagehash.ImageHash]:
+    if val is None:
         return None
-    if isinstance(value, (bytes, bytearray)):
-        try:
-            value = value.hex()
-        except Exception:
-            value = value.decode('utf-8', errors='ignore')
-    if isinstance(value, str):
-        s = value.strip().lower()
-        if not s:
-            return None
-        if s.startswith('0x'):
-            s = s[2:]
-        try:
-            return imagehash.hex_to_hash(s)
-        except Exception:
-            s = ''.join(ch for ch in s if ch in '0123456789abcdef')
-            if not s:
-                return None
-            try:
-                return imagehash.hex_to_hash(s)
-            except Exception:
-                return None
-    if isinstance(value, int):
-        hx = format(value, 'x')
-        try:
-            return imagehash.hex_to_hash(hx)
-        except Exception:
-            return None
+    s = str(val).strip()
+    if not s:
+        return None
+    # Try hex first
     try:
-        return imagehash.hex_to_hash(str(value))
+        return imagehash.hex_to_hash(s)
+    except Exception:
+        pass
+    # Try integer-to-hex
+    try:
+        i = int(s)
+        return imagehash.hex_to_hash(format(i, 'x'))
     except Exception:
         return None
 
+# ---------------- Load ----------------
+def _load_hashes_from_db(db_name: str):
+    _STATE.loaded = False
+    _STATE.db_name = db_name
+    _STATE.tables = []
+    _STATE.entries = []
+    _STATE.count = 0
+    _STATE.mode = "rgb"
+    _STATE.hash_n = 16  # default, will be overwritten by first parsed hash
 
-def _load_hashes_from_db(db_name: Optional[str]) -> bool:
-    """
-    Load hashes from ALL tables that have (id, r_phash, g_phash, b_phash)-style schema.
-    Uses cursor.description so it works regardless of row_factory.
-    """
-    global PRECOMPUTED_HASHES, _LOADED_DB_NAME, _LOADED_TABLES, _LOADED_COLS, _LOADED_ID_COL
-
-    PRECOMPUTED_HASHES.clear()
-    _LOADED_DB_NAME = None
-    _LOADED_TABLES = []
-    _LOADED_COLS = None
-    _LOADED_ID_COL = None
-
-    db_path = _resolve_db_path(db_name)
-    if not db_path or not os.path.exists(db_path):
-        logger.warning("hashing: no .db found or path invalid")
-        return False
-
+    conn = sqlite3.connect(f"data/{db_name}")
     try:
-        with _open_conn(db_path) as conn:
-            tables = _list_tables(conn)
-            tables = [t for t in tables if not t.startswith("sqlite_")]
+        tables = _candidate_tables(conn)
 
-            any_loaded = False
-            chosen_cols: Optional[Tuple[str, str, str]] = None
-            chosen_id: Optional[str] = None
+        # First prefer rgb tables, else fallback to single 'phash' tables
+        rgb_tables: List[str] = []
+        single_tables: List[str] = []
+        for t in tables:
+            cols = set(_table_columns(conn, t))
+            if {'id', 'r_phash', 'g_phash', 'b_phash'}.issubset(cols):
+                rgb_tables.append(t)
+            elif {'id', 'phash'}.issubset(cols):
+                single_tables.append(t)
 
-            for table in tables:
-                cols = _table_columns(conn, table)
-                id_col = next((c for c in ID_COL_CHOICES if c in cols), None)
-                if not id_col:
-                    continue
-                rgb = next((rgb for rgb in RGB_COL_CHOICES if all(c in cols for c in rgb)), None)
-                if not rgb:
-                    continue
+        cur = conn.cursor()
 
-                if chosen_cols is None:
-                    chosen_cols = rgb
-                if chosen_id is None:
-                    chosen_id = id_col
-
-                r_col, g_col, b_col = rgb
-                cur = conn.cursor()
-                try:
-                    cur.execute(f'SELECT "{id_col}", "{r_col}", "{g_col}", "{b_col}" FROM "{table}"')
-                except sqlite3.Error:
-                    # Last-resort unquoted (shouldn't happen given we quoted above)
-                    cur.execute(f"SELECT {id_col}, {r_col}, {g_col}, {b_col} FROM {table}")
-                rows = cur.fetchall()
-                # Build a column index map from description
-                col_names = [d[0] for d in cur.description]
-                try:
-                    idx_id = col_names.index(id_col)
-                    idx_r = col_names.index(r_col)
-                    idx_g = col_names.index(g_col)
-                    idx_b = col_names.index(b_col)
-                except ValueError:
-                    # If names are case-sensitive differences, fall back to lowercase compare
-                    lname_map = {n.lower(): i for i, n in enumerate(col_names)}
-                    idx_id = lname_map.get(id_col.lower())
-                    idx_r = lname_map.get(r_col.lower())
-                    idx_g = lname_map.get(g_col.lower())
-                    idx_b = lname_map.get(b_col.lower())
-                    if None in (idx_id, idx_r, idx_g, idx_b):
-                        logger.warning(f"hashing: could not map columns for table {table}; skipping")
+        if rgb_tables:
+            _STATE.mode = "rgb"
+            _STATE.tables = rgb_tables
+            first_hash_size_set = False
+            for t in rgb_tables:
+                cur.execute(
+                    f"SELECT {_qident('id')}, {_qident('r_phash')}, {_qident('g_phash')}, {_qident('b_phash')} "
+                    f"FROM {_qident(t)}"
+                )
+                for rid, r_hex, g_hex, b_hex in cur.fetchall():
+                    rH = _parse_hash(r_hex)
+                    gH = _parse_hash(g_hex)
+                    bH = _parse_hash(b_hex)
+                    if rH is None or gH is None or bH is None:
                         continue
+                    if not first_hash_size_set:
+                        # infer hash_n from ImageHash shape
+                        try:
+                            _STATE.hash_n = int(getattr(rH, "hash").shape[0])
+                            first_hash_size_set = True
+                        except Exception:
+                            pass
+                    _STATE.entries.append(((t, int(rid)), rH, gH, bH))
+                    _STATE.count += 1
+        elif single_tables:
+            _STATE.mode = "single"
+            _STATE.tables = single_tables
+            first_hash_size_set = False
+            for t in single_tables:
+                cur.execute(
+                    f"SELECT {_qident('id')}, {_qident('phash')} FROM {_qident(t)}"
+                )
+                for rid, h_hex in cur.fetchall():
+                    h = _parse_hash(h_hex)
+                    if h is None:
+                        continue
+                    if not first_hash_size_set:
+                        try:
+                            _STATE.hash_n = int(getattr(h, "hash").shape[0])
+                            first_hash_size_set = True
+                        except Exception:
+                            pass
+                    _STATE.entries.append(((t, int(rid)), h))
+                    _STATE.count += 1
+        else:
+            # Nothing matched
+            _STATE.mode = "rgb"
+            _STATE.tables = []
+            _STATE.entries = []
+            _STATE.count = 0
 
-                loaded_here = 0
-                for row in rows:
-                    rid = row[idx_id]
-                    r = _to_hash(row[idx_r])
-                    g = _to_hash(row[idx_g])
-                    b = _to_hash(row[idx_b])
-                    if r is not None and g is not None and b is not None:
-                        PRECOMPUTED_HASHES.append((table, rid, r, g, b))
-                        loaded_here += 1
+        _STATE.loaded = _STATE.count > 0
+    finally:
+        conn.close()
 
-                if loaded_here:
-                    _LOADED_TABLES.append(table)
-                    any_loaded = True
-                    logger.info(f"hashing: loaded {loaded_here} hashes from table {table}")
+def ensure_loaded(db_name: Optional[str]):
+    if not db_name:
+        return
+    if _STATE.loaded and _STATE.db_name == db_name and _STATE.count > 0:
+        return
+    _load_hashes_from_db(db_name)
 
-            if not any_loaded:
-                logger.warning("hashing: found tables but 0 rows with usable hashes")
-                return False
+# ---------------- Preprocess ----------------
+_CENTER_CROP_RATIO = 1.0
+def set_center_crop_ratio(r: float):
+    global _CENTER_CROP_RATIO
+    _CENTER_CROP_RATIO = max(0.5, min(1.0, float(r)))
 
-            _LOADED_DB_NAME = os.path.basename(db_path)
-            _LOADED_COLS = chosen_cols
-            _LOADED_ID_COL = chosen_id
-            logger.info(f"hashing: total loaded hashes: {len(PRECOMPUTED_HASHES)} across {len(_LOADED_TABLES)} tables")
-            return True
+def _center_crop(pil: Image.Image, ratio: float) -> Image.Image:
+    if ratio >= 0.999:
+        return pil
+    w, h = pil.size
+    cw, ch = int(w * ratio), int(h * ratio)
+    x1 = (w - cw) // 2
+    y1 = (h - ch) // 2
+    return pil.crop((x1, y1, x1 + cw, y1 + ch))
 
-    except sqlite3.Error as e:
-        logger.exception(f"hashing: sqlite error while loading hashes: {e}")
-        return False
+def _preprocess(pil: Image.Image) -> Image.Image:
+    img = pil.convert("RGB")
+    img = _center_crop(img, _CENTER_CROP_RATIO)
+    img = ImageOps.autocontrast(img, cutoff=1)
+    return img
 
+# ---------------- Matching ----------------
+def _hash_rgb(pil: Image.Image, n: int):
+    r, g, b = pil.split()
+    return (imagehash.phash(r, n), imagehash.phash(g, n), imagehash.phash(b, n))
 
-def ensure_loaded(db_name: Optional[str] = None) -> bool:
-    if PRECOMPUTED_HASHES and (db_name is None or db_name == _LOADED_DB_NAME):
-        return True
-    return _load_hashes_from_db(db_name)
+def _hash_single(pil: Image.Image, n: int):
+    # grayscale phash
+    return imagehash.phash(pil.convert("L"), n)
 
+def _dist_rgb(h1, h2) -> float:
+    # average the Hamming distance across channels
+    return float((h1[0] - h2[0]) + (h1[1] - h2[1]) + (h1[2] - h2[2])) / 3.0
 
-# ---------- Visibility helpers ----------
+def top_k_for_image(pil: Image.Image, k: int = 3, hash_size: Optional[int] = None):
+    ensure_loaded(_STATE.db_name)
+    if not _STATE.loaded or not _STATE.entries:
+        return []
+    img = _preprocess(pil)
+    n = _STATE.hash_n if hash_size is None else int(hash_size)
 
-def get_status() -> Dict[str, Any]:
-    """Return loader status for debugging/telemetry."""
-    return {
-        'loaded': bool(PRECOMPUTED_HASHES),
-        'count': len(PRECOMPUTED_HASHES),
-        'db_name': _LOADED_DB_NAME,
-        'tables': list(_LOADED_TABLES),
-        'cols_rgb': _LOADED_COLS,
-        'id_col': _LOADED_ID_COL,
-    }
+    cand = []
+    if _STATE.mode == "rgb":
+        h = _hash_rgb(img, n)
+        for (tbl_id, rH, gH, bH) in _STATE.entries:
+            try:
+                d = _dist_rgb(h, (rH, gH, bH))
+            except Exception:
+                # different hash sizes — skip
+                continue
+            cand.append((tbl_id, d))
+    else:
+        h = _hash_single(img, n)
+        for (tbl_id, hH) in _STATE.entries:
+            try:
+                d = float(h - hH)
+            except Exception:
+                continue
+            cand.append((tbl_id, d))
 
+    cand.sort(key=lambda x: x[1])
+    return cand[:k]
 
-def top_k_for_image(img: Image.Image, k: int = 3, hash_size: int = DEFAULT_HASH_SIZE) -> List[Tuple[Tuple[str, Any], float]]:
-    """Return top-k nearest neighbors by avg RGB pHash distance."""
-    if not PRECOMPUTED_HASHES:
-        ensure_loaded(None)
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    r, g, b = img.split()
-    r_hash = imagehash.phash(r, hash_size)
-    g_hash = imagehash.phash(g, hash_size)
-    b_hash = imagehash.phash(b, hash_size)
-    distances: List[Tuple[Tuple[str, Any], float]] = []
-    for table, rid, sr, sg, sb in PRECOMPUTED_HASHES:
-        avg = ((r_hash - sr) + (g_hash - sg) + (b_hash - sb)) / 3.0
-        distances.append(((table, rid), avg))
-    distances.sort(key=lambda x: x[1])
-    return distances[:k]
-
-
-# ---------- Public API ----------
-
-def hash_image_color(img: Image.Image, hash_size: int = DEFAULT_HASH_SIZE) -> Tuple[Optional[Tuple[str, Any]], float]:
-    """
-    Returns ((table_name, id), avg_distance)
-    """
-    if not PRECOMPUTED_HASHES:
-        ensure_loaded(None)
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    r, g, b = img.split()
-    r_hash = imagehash.phash(r, hash_size)
-    g_hash = imagehash.phash(g, hash_size)
-    b_hash = imagehash.phash(b, hash_size)
-
-    best_key: Optional[Tuple[str, Any]] = None
-    best_dist = float('inf')
-    for table, rid, sr, sg, sb in PRECOMPUTED_HASHES:
-        avg = ((r_hash - sr) + (g_hash - sg) + (b_hash - sb)) / 3.0
-        if avg < best_dist:
-            best_dist = avg
-            best_key = (table, rid)
-    return best_key, best_dist
-
-
-def compute_distances_for_image(img: Image.Image, hash_size: int = DEFAULT_HASH_SIZE) -> List[Tuple[Tuple[str, Any], float]]:
-    """Return list of ((table, id), avg_distance) for all known hashes."""
-    if not PRECOMPUTED_HASHES:
-        ensure_loaded(None)
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    r, g, b = img.split()
-    r_hash = imagehash.phash(r, hash_size)
-    g_hash = imagehash.phash(g, hash_size)
-    b_hash = imagehash.phash(b, hash_size)
-    out: List[Tuple[Tuple[str, Any], float]] = []
-    for table, rid, sr, sg, sb in PRECOMPUTED_HASHES:
-        avg = ((r_hash - sr) + (g_hash - sg) + (b_hash - sb)) / 3.0
-        out.append(((table, rid), avg))
-    return out
-
-
-# Preload at import (best-effort)
-try:
-    ensure_loaded(None)
-except Exception:
-    pass
+def hash_image_color(pil: Image.Image, hash_size: Optional[int] = None):
+    res = top_k_for_image(pil, k=1, hash_size=hash_size)
+    if not res:
+        return None, 1e9
+    return res[0][0], float(res[0][1])

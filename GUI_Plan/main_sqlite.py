@@ -1,12 +1,14 @@
-# main_sqlite.py — Interactive DB & sort selection + persistent controls + loading spinner
-# Keys: [ / ] threshold, d ROI window, h hash neighbor logs, c toggle fallback ROI, e edges window, q/Esc quit
+# main_sqlite.py — Responsive UI + background matcher + debug tools
+# Keys: [ / ] thr, d ROI, h hash, c fallback, e edges, x art-crop, ,/. match-rate, p pause, m manual, s save ROI, t top-10, i inspect DB, q/Esc quit
 
 import os
 import sys
 import time
 import threading
 import logging
-from typing import Optional, Tuple, List
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List, Any
+from queue import Queue, Empty
 
 import cv2
 import numpy as np
@@ -28,6 +30,7 @@ from hashing import (
     ensure_loaded,
     top_k_for_image,
     get_status,
+    set_center_crop_ratio,
 )
 
 # ---------------------------
@@ -41,36 +44,58 @@ show_hash_debug = False       # 'h' to toggle hash neighbor logging (WARNING-lev
 show_edges = False            # 'e' to toggle an edges window
 allow_fallback_roi = True     # 'c' to toggle center-crop fallback when no contour found
 status_banner_secs = 3.0      # show "hashes loaded" banner on screen for N seconds
+art_crop_levels = [1.0, 0.9, 0.8, 0.7, 0.6]
+art_crop_idx = 0  # start with 1.0 (no crop)
+
+# Match cadence (ms)
+MATCH_INTERVAL_MS = 300
+paused_matching = False
 
 # ---------------------------
-# Hash wrapper (neighbors only when show_hash_debug)
+# Background matching
 # ---------------------------
-def _current_db():
-    return SELECTED_DB_NAME
+@dataclass
+class MatchJob:
+    pil_img: Image.Image
+    want_neighbors: bool = False
 
-def hash_image_color(img: Image.Image, hash_size: int = DEFAULT_HASH_SIZE) -> Tuple[Optional[str], float]:
-    try:
-        ensure_loaded(_current_db())
-    except Exception:
-        pass
+@dataclass
+class MatchResult:
+    best_id: Optional[Any] = None
+    best_dist: float = 1e9
+    neighbors: List[Tuple[Any, float]] = field(default_factory=list)
+    timestamp: float = 0.0
+    busy: bool = False
 
-    best_id, best_dist = _hash_image_color_core(img, hash_size)
+match_queue: Queue = Queue(maxsize=1)
+match_result = MatchResult()
 
-    if show_hash_debug:
+def _match_worker():
+    global match_result
+    while True:
+        job: MatchJob = match_queue.get()
+        if job is None:
+            break  # shutdown
         try:
-            logger = logging.getLogger(__name__)
-            if best_id is None:
-                logger.warning("hash debug: no best_id from hash_image_color")
-            if best_dist is None or float(best_dist) > distance_threshold:
+            match_result.busy = True
+            best_id, best_dist = _hash_image_color_core(job.pil_img, None)
+            nbs = []
+            if job.want_neighbors:
                 try:
-                    neighbors = top_k_for_image(img, k=3, hash_size=hash_size)
-                    logger.warning(f"hash debug: best={best_id} dist={best_dist}; top3={neighbors}")
-                except Exception as e:
-                    logger.warning(f"hash debug: neighbor calc failed: {e}")
+                    nbs = top_k_for_image(job.pil_img, k=3, hash_size=None)
+                except Exception:
+                    nbs = []
+            match_result = MatchResult(
+                best_id=best_id,
+                best_dist=float(best_dist if best_dist is not None else 1e9),
+                neighbors=nbs,
+                timestamp=time.time(),
+                busy=False,
+            )
         except Exception:
-            pass
+            match_result = MatchResult(best_id=None, best_dist=1e9, neighbors=[], timestamp=time.time(), busy=False)
 
-    return best_id, best_dist
+worker_thread = None
 
 # ---------------------------
 # Spinner (console) while hashes load
@@ -85,7 +110,6 @@ def _spinner(message: str, stop_event: threading.Event, period: float = 0.1):
             time.sleep(period)
             i += 1
     finally:
-        # clear the line
         sys.stdout.write("\r" + " " * (len(message) + 2) + "\r")
         sys.stdout.flush()
 
@@ -107,7 +131,7 @@ def _list_db_files() -> list:
 def choose_db_interactive() -> Optional[str]:
     dbs = _list_db_files()
     if not dbs:
-        logging.getLogger(__name__).warning("No .db files found under ./data")
+        print("No .db files found under ./data")
         return None
 
     print("\nAvailable databases:")
@@ -139,7 +163,6 @@ def _compute_edges(frame_bgr: np.ndarray) -> np.ndarray:
     return edges
 
 def _center_crop_roi(frame_bgr: np.ndarray, scale: float = 0.7) -> Image.Image:
-    """Crop the center of the frame (scale of width/height), resize to WIDTHxHEIGHT, return PIL Image."""
     h, w = frame_bgr.shape[:2]
     cw, ch = int(w * scale), int(h * scale)
     x1 = (w - cw) // 2
@@ -150,10 +173,6 @@ def _center_crop_roi(frame_bgr: np.ndarray, scale: float = 0.7) -> Image.Image:
     return Image.fromarray(rgb)
 
 def _extract_card_roi(frame_bgr) -> Optional[Tuple[Image.Image, str]]:
-    """
-    Try to find card via contour. If not found and allow_fallback_roi is True,
-    use center-crop fallback. Returns (PIL Image, mode) where mode is "contour" or "fallback".
-    """
     contour = find_card_contour(frame_bgr)
     if contour is not None:
         try:
@@ -162,10 +181,8 @@ def _extract_card_roi(frame_bgr) -> Optional[Tuple[Image.Image, str]]:
             return Image.fromarray(card_rgb), "contour"
         except Exception:
             pass
-
     if allow_fallback_roi:
         return _center_crop_roi(frame_bgr), "fallback"
-
     return None
 
 def _overlay_text(frame, text, x, y, color=(255, 255, 255)):
@@ -175,7 +192,6 @@ def _overlay_text(frame, text, x, y, color=(255, 255, 255)):
         pass
 
 def _draw_controls_panel(frame, lines: List[str], margin: int = 10):
-    """Draw a semi-transparent control/help panel in the top-right corner."""
     try:
         h, w = frame.shape[:2]
         sizes = [cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0] for line in lines]
@@ -205,8 +221,9 @@ def _draw_controls_panel(frame, lines: List[str], margin: int = 10):
 # Main
 # ---------------------------
 def main():
-    global SELECTED_DB_NAME, current_sorting_mode
-    global distance_threshold, show_debug_roi, show_hash_debug, show_edges, allow_fallback_roi
+    global SELECTED_DB_NAME, current_sorting_mode, distance_threshold
+    global show_debug_roi, show_hash_debug, show_edges, allow_fallback_roi
+    global art_crop_idx, MATCH_INTERVAL_MS, paused_matching, worker_thread
 
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s")
     print("Starting sorter in SQLite mode...")
@@ -227,9 +244,9 @@ def main():
         spinner_thread.join()
     elapsed = time.time() - t0
 
-    # --- Report status (print once + on-screen banner) ---
+    # --- Report status ---
     status = get_status()
-    print(f"Loaded {status.get('count', 0)} hashes from {len(status.get('tables', []))} tables in {elapsed:.1f}s (DB={status.get('db_name')})")
+    print(f"Loaded {status.get('count', 0)} hashes from {len(status.get('tables', []))} tables in {elapsed:.1f}s (DB={status.get('db_name')}) | mode={status.get('mode')} size={status.get('hash_size')}")
     banner_until = time.time() + status_banner_secs
 
     # --- Sorting selection ---
@@ -240,18 +257,27 @@ def main():
 
     # --- Camera ---
     cam = _open_camera(0)
-    print("Camera opened. Hotkeys: [ ] thr, d ROI, h hash, c fallback, e edges, q quit.")
+    print("Camera opened. Hotkeys: [ ] thr, d ROI, h hash, c fallback, e edges, x art-crop, ,/. rate, p pause, m manual, s save ROI, t top-10, i inspect DB, q quit.")
     try:
         cv2.namedWindow("Sorter", cv2.WINDOW_NORMAL)
     except Exception:
         pass
 
+    # Apply initial art-crop ratio
+    set_center_crop_ratio(art_crop_levels[art_crop_idx])
+
+    # Start worker
+    worker_thread = threading.Thread(target=_match_worker, daemon=True)
+    worker_thread.start()
+    last_submit_ts = 0.0
+
     frame_count = 0
+    last_roi = None
     try:
         while True:
             ret, frame = cam.read()
             if not ret:
-                logging.getLogger(__name__).warning("Failed to read frame from camera.")
+                print("Failed to read frame from camera.")
                 continue
 
             # Optional edges window
@@ -271,40 +297,51 @@ def main():
             roi = _extract_card_roi(frame)
             if roi is None:
                 _overlay_text(frame, "No card contour detected (fallback off)", 10, 30, (0, 200, 255))
+                pil_img = None
+                roi_mode = None
             else:
                 pil_img, roi_mode = roi
+                last_roi = pil_img
                 overlay_y = 30
                 if roi_mode == "fallback":
                     _overlay_text(frame, "Using fallback center crop", 10, overlay_y, (255, 180, 60))
                     overlay_y += 22
 
-                # Hash match
-                best_id, best_dist = hash_image_color(pil_img, hash_size=DEFAULT_HASH_SIZE)
-                _overlay_text(frame, f"Best: {best_id}  dist: {best_dist:.1f}  thr: {distance_threshold:.0f}", 10, overlay_y, (200, 200, 200))
+            # Submit matching job at cadence
+            now = time.time()
+            want_neighbors = show_debug_roi
+            if pil_img is not None and not paused_matching and (now - last_submit_ts) * 1000.0 >= MATCH_INTERVAL_MS:
+                try:
+                    if match_queue.full():
+                        try:
+                            match_queue.get_nowait()
+                        except Empty:
+                            pass
+                    match_queue.put_nowait(MatchJob(pil_img=pil_img, want_neighbors=want_neighbors))
+                    last_submit_ts = now
+                    match_result.busy = True
+                except Exception:
+                    pass
 
-                # Optional ROI & top-3 neighbor window
-                if show_debug_roi:
-                    try:
-                        roi_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-                        cv2.imshow("ROI", roi_bgr)
-                    except Exception:
-                        pass
-                    try:
-                        nbs = top_k_for_image(pil_img, k=3, hash_size=DEFAULT_HASH_SIZE)
-                        y0 = overlay_y + 30
-                        for (tbl_id, dist) in nbs:
+            # Read current result & overlay
+            br = match_result
+            if pil_img is not None:
+                _overlay_text(frame, f"Best: {br.best_id}  dist: {br.best_dist:.1f}  thr: {distance_threshold:.0f}", 10, 30 if roi_mode != 'fallback' else 52, (200, 200, 200))
+                if show_debug_roi and br.neighbors:
+                    y0 = (52 if roi_mode == 'fallback' else 30) + 30
+                    for (tbl_id, dist) in br.neighbors:
+                        try:
                             tbl, rid = tbl_id
-                            info = extract_card_info((tbl, rid), db_name=SELECTED_DB_NAME)
-                            nm = (info or {}).get("Name", "?")
+                            nm = (extract_card_info((tbl, rid), db_name=SELECTED_DB_NAME) or {}).get("Name", "?")
                             _overlay_text(frame, f"  {tbl}:{rid}  {dist:.1f}  {nm}", 10, y0, (160, 160, 255))
                             y0 += 22
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
 
                 # Decision
-                if best_id is not None and best_dist <= distance_threshold:
-                    info = extract_card_info(best_id, db_name=SELECTED_DB_NAME)
-                    if info and card_is_allowed(best_id, db_name=SELECTED_DB_NAME):
+                if br.best_id is not None and br.best_dist <= distance_threshold:
+                    info = extract_card_info(br.best_id, db_name=SELECTED_DB_NAME)
+                    if info and card_is_allowed(br.best_id, db_name=SELECTED_DB_NAME):
                         try:
                             draw_info_as_json(frame, info, start_x=10, start_y=120, line_height=18)
                         except Exception:
@@ -314,13 +351,14 @@ def main():
                     else:
                         _overlay_text(frame, "Not allowed / excluded set", 10, 90, (0, 200, 200))
                 else:
-                    _overlay_text(frame, "Matching...", 10, 90, (200, 200, 200))
+                    _overlay_text(frame, "Matching..." + (" (busy)" if br.busy else ""), 10, 90, (200, 200, 200))
 
             # One-time banner (bottom-left)
             if time.time() < banner_until:
                 _overlay_text(frame, f"Loaded {status.get('count',0)} hashes from {len(status.get('tables',[]))} tables ({status.get('db_name','?')})", 10, HEIGHT - 20, (100, 255, 100))
 
             # Controls panel (top-right)
+            status = get_status()
             panel_lines = [
                 f"DB: {SELECTED_DB_NAME or '?'}",
                 f"Mode: {current_sorting_mode}",
@@ -328,7 +366,10 @@ def main():
                 f"ROI debug: {'ON' if show_debug_roi else 'OFF'}",
                 f"Edges: {'ON' if show_edges else 'OFF'}",
                 f"Fallback ROI: {'ON' if allow_fallback_roi else 'OFF'}",
-                "Hotkeys: [ ] thr, d ROI, h hash, c fallback, e edges, q quit",
+                f"Art crop: {art_crop_levels[art_crop_idx]:.1f} (x to cycle)",
+                f"DB hash mode: {status.get('mode')} size: {status.get('hash_size')}",
+                f"Match every: {MATCH_INTERVAL_MS} ms  ({'PAUSED' if paused_matching else 'RUN'})",
+                "Hotkeys: [ ] thr, d ROI, h hash, c fallback, e edges, x crop, ,/. rate, p pause, m manual, s save, t top-10, i inspect DB, q quit",
             ]
             _draw_controls_panel(frame, panel_lines)
 
@@ -342,7 +383,6 @@ def main():
             k = cv2.waitKeyEx(1)
             if k != -1:
                 kc = k & 0xFF
-                # FIX: avoid 'in (27)' mistake; use equality
                 if kc == 27 or k == 27:  # Esc
                     break
                 elif kc in (ord('q'), ord('Q')):
@@ -379,12 +419,70 @@ def main():
                 elif kc in (ord('c'), ord('C')):
                     allow_fallback_roi = not allow_fallback_roi
                     print(f"Fallback ROI -> {allow_fallback_roi}")
+                elif kc in (ord('x'), ord('X')):
+                    art_crop_idx = (art_crop_idx + 1) % len(art_crop_levels)
+                    set_center_crop_ratio(art_crop_levels[art_crop_idx])
+                    print(f"Art-crop ratio -> {art_crop_levels[art_crop_idx]:.1f}")
+                elif kc in (ord(','),):  # slower
+                    MATCH_INTERVAL_MS = min(2000, MATCH_INTERVAL_MS + 50)
+                    print(f"Match interval -> {MATCH_INTERVAL_MS} ms")
+                elif kc in (ord('.'),):  # faster
+                    MATCH_INTERVAL_MS = max(50, MATCH_INTERVAL_MS - 50)
+                    print(f"Match interval -> {MATCH_INTERVAL_MS} ms")
+                elif kc in (ord('p'), ord('P')):
+                    paused_matching = not paused_matching
+                    print(f"Matching paused -> {paused_matching}")
+                elif kc in (ord('m'), ord('M')):
+                    if last_roi is not None:
+                        try:
+                            if match_queue.full():
+                                try:
+                                    match_queue.get_nowait()
+                                except Empty:
+                                    pass
+                            match_queue.put_nowait(MatchJob(pil_img=last_roi, want_neighbors=True))
+                            match_result.busy = True
+                            print("Manual match queued.")
+                        except Exception:
+                            pass
+                elif kc in (ord('s'), ord('S')):
+                    if last_roi is not None:
+                        os.makedirs("captures", exist_ok=True)
+                        fname = time.strftime("captures/roi_%Y%m%d_%H%M%S.png")
+                        last_roi.save(fname)
+                        print(f"Saved ROI -> {fname}")
+                elif kc in (ord('t'), ord('T')):
+                    if last_roi is not None:
+                        # Synchronous top-10 dump for debugging
+                        try:
+                            neighbors = top_k_for_image(last_roi, k=10, hash_size=None)
+                            print("Top-10 neighbors:")
+                            for tbl_id, dist in neighbors:
+                                try:
+                                    tbl, rid = tbl_id
+                                except Exception:
+                                    tbl, rid = str(tbl_id), "?"
+                                print(f"  {tbl}:{rid}  dist={dist:.1f}")
+                        except Exception as e:
+                            print(f"Top-10 failed: {e}")
+                elif kc in (ord('i'), ord('I')):
+                    st = get_status()
+                    print("DB status:", st)
 
             frame_count += 1
 
     except KeyboardInterrupt:
         print("Interrupted by user.")
     finally:
+        try:
+            match_queue.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            if worker_thread is not None:
+                worker_thread.join(timeout=0.2)
+        except Exception:
+            pass
         try:
             cam.release()
         except Exception:
