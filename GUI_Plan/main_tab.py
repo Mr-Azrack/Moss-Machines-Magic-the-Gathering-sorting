@@ -1,5 +1,7 @@
+# main_tab.py
 import tkinter as tk
 from tkinter import ttk, messagebox
+import threading
 import cv2
 from PIL import Image, ImageTk
 import time
@@ -10,7 +12,6 @@ import logging
 from datetime import datetime
 from collections import Counter
 
-# App config
 from config import (
     SORTING_MODES,
     CROP_SIZE,
@@ -23,19 +24,53 @@ from config import (
     TIMEOUT_NAME,
 )
 
-# Low-level helpers
-from detection import find_card_contour, get_perspective_corrected_card
-from detectname import find_text, compare_strings
-from hashing import hash_image_color, compute_distances_for_image
-from sorting import draw_info_as_json, get_bin_number, get_name
+from detection import find_card_contour
+from detectname import find_text
+from hashing import ensure_loaded_for_db
+from sorting import get_name
 
-# DB-backed helpers
 import main_sqlite
 from database import list_db_files
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger("ultralytics").setLevel(logging.WARNING)
+
+
+class BusyPopup:
+    """Tiny non-blocking notifier shown while we build the hash index."""
+    def __init__(self, parent, text="Building hash index…"):
+        self.parent = parent
+        self.top = tk.Toplevel(parent)
+        self.top.title("Please wait")
+        self.top.resizable(False, False)
+        self.top.transient(parent)
+        self.top.attributes("-topmost", True)
+        frm = ttk.Frame(self.top, padding=10)
+        frm.grid(sticky="nsew")
+        ttk.Label(frm, text=text).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.pb = ttk.Progressbar(frm, mode="indeterminate", length=200)
+        self.pb.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.pb.start(12)
+        self.top.update_idletasks()
+        try:
+            px = self.parent.winfo_rootx()
+            py = self.parent.winfo_rooty()
+            pw = self.parent.winfo_width()
+            ph = self.parent.winfo_height()
+            tw = self.top.winfo_width()
+            th = self.top.winfo_height()
+            x = px + (pw - tw) // 2
+            y = py + (ph - th) // 3
+            self.top.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def close(self):
+        try: self.pb.stop()
+        except Exception: pass
+        try: self.top.destroy()
+        except Exception: pass
 
 
 class MainTab:
@@ -50,9 +85,9 @@ class MainTab:
         self.serial_connected = False
 
         # State
-        self.processing_active = False
         self.frame_count = 0
         self.total_processing_time = 0
+        self.hashing_in_progress = False
 
         # Layout
         self.main_container = None
@@ -69,6 +104,8 @@ class MainTab:
 
         # DB selection
         self.db_var = tk.StringVar(value="")
+        self.sort_var = tk.StringVar(value="color")
+        self.threshold_var = tk.StringVar(value="5.00")
 
         self.setup_ui()
         self.refresh_db_list()
@@ -86,19 +123,7 @@ class MainTab:
             self.serial_connected = False
             return False
 
-    def send_to_arduino(self, send_str):
-        if self.serial_connected and self.ser and send_str:
-            try:
-                self.ser.write(send_str.encode("utf-8"))
-                self.wait_for_arduino()
-                self.add_log(f"Sent to Arduino: {send_str}")
-            except Exception as e:
-                self.add_log(f"Error sending to Arduino: {e}")
-                self.serial_connected = False
-
-    def recv_from_arduino(self):
-        if not self.serial_connected or not self.ser:
-            return ""
+    def wait_for_arduino(self):
         try:
             ck = ""
             x = b"z"
@@ -108,26 +133,18 @@ class MainTab:
                 if ord(x) != START_MARKER:
                     ck += x.decode("utf-8")
                 x = self.ser.read()
-            return ck
-        except Exception as e:
-            self.add_log(f"Error receiving from Arduino: {e}")
-            self.serial_connected = False
-            return ""
-
-    def wait_for_arduino(self):
-        if not self.serial_connected or not self.ser:
-            return
-        try:
-            msg = ""
-            while "Arduino is ready" not in msg:
-                while self.ser.in_waiting == 0:
-                    pass
-                msg = self.recv_from_arduino()
-                if msg:
-                    self.add_log(f"Arduino: {msg}")
         except Exception as e:
             self.add_log(f"Error waiting for Arduino: {e}")
-            self.serial_connected = False
+
+    def send_to_arduino(self, send_str):
+        if self.serial_connected and self.ser and send_str:
+            try:
+                self.ser.write(send_str.encode("utf-8"))
+                self.wait_for_arduino()
+                self.add_log(f"Sent to Arduino: {send_str}")
+            except Exception as e:
+                self.add_log(f"Error sending to Arduino: {e}")
+                self.serial_connected = False
 
     # ---------------- UI ----------------
     def get_scaled_font(self, base_size=None):
@@ -164,7 +181,6 @@ class MainTab:
         parent.columnconfigure(0, weight=1)
         pad = 6
 
-        # DB selector
         db_frame = ttk.LabelFrame(parent, text="Database (.db)", padding=pad)
         db_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         db_frame.columnconfigure(1, weight=1)
@@ -172,41 +188,25 @@ class MainTab:
         ttk.Label(db_frame, text="Select DB:", font=self.get_small_font()).grid(row=0, column=0, sticky="w")
         self.db_combo = ttk.Combobox(db_frame, textvariable=self.db_var, state="readonly", font=self.get_scaled_font())
         self.db_combo.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        self.db_combo.bind("<<ComboboxSelected>>", self.on_db_selected)
+        # No auto-hashing on combobox change; user must click Select
+        ttk.Button(db_frame, text="Select", command=self.on_db_confirm).grid(row=0, column=2, padx=(4, 0))
 
-        ttk.Button(db_frame, text="Refresh", command=self.refresh_db_list).grid(row=0, column=2, padx=(4, 0))
-
-        # Sort options
         sort_frame = ttk.LabelFrame(parent, text="Sort Method", padding=pad)
         sort_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-
-        self.sort_var = tk.StringVar(value="color")
         for i, (label, value) in enumerate([
             ("Color", "color"),
             ("Set", "set"),
-            ("Alpha", "alpha"),
             ("Price", "price"),
             ("Buy Mode", "buy"),
         ]):
             ttk.Radiobutton(sort_frame, text=label, value=value, variable=self.sort_var).grid(row=i, column=0, sticky="w")
 
-        thr_row = 5
         thresh = ttk.Frame(sort_frame)
-        thresh.grid(row=thr_row, column=0, sticky="ew", pady=(4, 0))
+        thresh.grid(row=4, column=0, sticky="ew", pady=(4, 0))
         thresh.columnconfigure(1, weight=1)
         ttk.Label(thresh, text="Price $", font=self.get_small_font()).grid(row=0, column=0, sticky="w")
-        self.threshold_var = tk.StringVar(value="5.00")
         ttk.Entry(thresh, textvariable=self.threshold_var, width=10).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-        # Arduino
-        serial_frame = ttk.LabelFrame(parent, text="Arduino", padding=pad)
-        serial_frame.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        self.connect_button = ttk.Button(serial_frame, text="Connect", command=self.toggle_serial_connection)
-        self.connect_button.grid(row=0, column=0, sticky="ew")
-        self.serial_status_label = ttk.Label(serial_frame, text="Disconnected", foreground="red", font=self.get_small_font())
-        self.serial_status_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
-
-        # Controls
         ctrl = ttk.LabelFrame(parent, text="Sorter Control", padding=pad)
         ctrl.grid(row=3, column=0, sticky="ew")
         self.start_button = ttk.Button(ctrl, text="Start", command=self.start_sorting)
@@ -224,7 +224,8 @@ class MainTab:
 
         self.camera_frame = ttk.LabelFrame(parent, text="Live Camera Feed", padding=6)
         self.camera_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
-        self.video_label = tk.Label(self.camera_frame, text="Camera feed will appear here", bg="black", fg="white", font=self.get_scaled_font())
+        self.video_label = tk.Label(self.camera_frame, text="Camera feed will appear here",
+                                    bg="black", fg="white", font=self.get_scaled_font())
         self.video_label.grid(row=0, column=0, sticky="nsew")
 
         data_frame = ttk.LabelFrame(parent, text="Current Card Data", padding=6)
@@ -245,19 +246,52 @@ class MainTab:
                 self.db_var.set(os.path.splitext(main_sqlite.SELECTED_DB_NAME)[0])
             elif display:
                 self.db_var.set(display[0])
-                main_sqlite.SELECTED_DB_NAME = display[0] + ".db"
         except Exception as e:
             messagebox.showerror("DB Error", f"Failed to list DB files in ./data\n{e}")
 
-    def on_db_selected(self, _evt=None):
+    def on_db_confirm(self):
+        if self.hashing_in_progress:
+            self.add_log("Hash indexing already in progress; please wait…")
+            return
+
         chosen = self.db_var.get().strip()
         main_sqlite.SELECTED_DB_NAME = chosen + ".db" if chosen else None
         self.add_log(f"DB set to: {main_sqlite.SELECTED_DB_NAME}")
 
+        if not main_sqlite.SELECTED_DB_NAME:
+            messagebox.showwarning("Missing DB", "Please choose a database from the dropdown.")
+            return
+
+        self.hashing_in_progress = True
+        self.status_state_label.config(text="HASHING…")
+        popup = BusyPopup(self.parent, text=f"Building hash index for {main_sqlite.SELECTED_DB_NAME}…")
+        self.add_log(f"Indexing hashes from {main_sqlite.SELECTED_DB_NAME} …")
+
+        def worker():
+            err = None
+            count = 0
+            try:
+                count = ensure_loaded_for_db(main_sqlite.SELECTED_DB_NAME, on_status=self.add_log)
+            except Exception as e:
+                err = e
+            def finish():
+                try: popup.close()
+                except Exception: pass
+                if err:
+                    messagebox.showerror("Hash Index Error", str(err))
+                    self.add_log(f"Hash indexing failed: {err}")
+                else:
+                    self.add_log(f"Hash index ready ({count} cards).")
+                self.status_state_label.config(text="IDLE")
+                self.hashing_in_progress = False
+            self.parent.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     # ---------------- Sorting ----------------
     def start_sorting(self):
         if not self.db_var.get():
-            messagebox.showwarning("Missing DB", "Please select a database (.db) from the dropdown.")
+            messagebox.showwarning("Missing DB", "Please select a database (.db) and click Select.")
             return
         self.shared_data["sorting_active"] = True
         self.shared_data["current_sort_method"] = self.sort_var.get()
@@ -348,21 +382,6 @@ class MainTab:
     # ---------------- Utils ----------------
     def _set_shared_card_status_unrecognized(self, reason):
         self.shared_data["current_card_data"] = {"status": "unrecognized", "reason": reason, "bin": 33}
-
-    def toggle_serial_connection(self):
-        if not self.serial_connected:
-            if self.init_serial():
-                self.connect_button.config(text="Disconnect")
-                self.serial_status_label.config(text="Connected", foreground="green")
-            else:
-                messagebox.showerror("Connection Error", "Failed to connect to Arduino")
-        else:
-            if self.ser:
-                self.ser.close()
-            self.serial_connected = False
-            self.connect_button.config(text="Connect")
-            self.serial_status_label.config(text="Disconnected", foreground="red")
-            self.add_log("Arduino disconnected")
 
     def add_log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")

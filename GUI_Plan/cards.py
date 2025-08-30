@@ -1,177 +1,84 @@
-# cards.py — extract card info from per-set tables (e.g., AU1E, EE1E, ...)
-# Accepts a composite key (table_name, id) and normalizes fields for sorting.
-
 import os
-import sqlite3
-from typing import Any, Dict, Optional, Tuple, List
+import json
+import glob
 
-from config import EXCLUDED_SETS, DB_DATA_DIR
+from config import EXCLUDED_SETS
 
-# If you have database helpers, use them
-try:
-    from database import get_db_path, get_connection
-except Exception:
-    get_db_path = None
-    get_connection = None
+CARDS_DATA = []
+CARD_DATA_BY_ID = {}
 
+# Construct the wildcard pattern in the current directory
+default_files_pattern = 'default*.json'
 
-def _db_path(db_name: Optional[str]) -> Optional[str]:
-    if not db_name:
-        # Try helper
-        if get_db_path:
-            try:
-                p = get_db_path(None)
-                if p and os.path.exists(p):
-                    return p
-            except Exception:
-                pass
-        # Fallback: first .db in ./data
+# Find all files matching the pattern in the current directory
+default_files = glob.glob(default_files_pattern)
+
+# Sort files by modification time (newest first)
+default_files.sort(key=os.path.getmtime, reverse=True)
+
+# Check if any files were found
+if default_files:
+    # Get the path of the newest file
+    newest_file_path = default_files[0]
+
+    if os.path.exists(newest_file_path):
         try:
-            files = [f for f in os.listdir(DB_DATA_DIR) if f.lower().endswith(".db")]
-            if files:
-                return os.path.join(DB_DATA_DIR, files[0])
-        except Exception:
-            return None
-
-    # accept absolute or join into /data
-    if os.path.isabs(db_name or "") and os.path.exists(db_name):
-        return db_name
-    cand = os.path.join(DB_DATA_DIR, db_name or "")
-    return cand if os.path.exists(cand) else None
-
-
-def _open(db_path: str) -> sqlite3.Connection:
-    if get_connection:
-        try:
-            return get_connection(os.path.basename(db_path))
-        except Exception:
-            pass
-    conn = sqlite3.connect(db_path)
-    # We'll convert rows to dict via cursor.description, so no row_factory needed.
-    return conn
-
-
-def _normalize_row(table: str, row: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize Akora-style columns to the keys used by sorting.py:
-      - Name -> str
-      - Colors -> list[str] (use extAttribute if present)
-      - Types -> list[str] (extCardType, subTypeName)
-      - Set -> table name (lowercased)
-      - Price -> numeric (use marketPrice, fallback midPrice/highPrice/lowPrice)
-      - CMC/mana_cost not available; leave absent.
-    """
-    def _fnum(val):
-        try:
-            return float(val)
-        except Exception:
-            return None
-
-    name = row.get("name")
-    ext_attr = row.get("extAttribute")
-    ext_type = row.get("extCardType")
-    sub_type = row.get("subTypeName")
-
-    price = (
-        _fnum(row.get("marketPrice")) or
-        _fnum(row.get("midPrice")) or
-        _fnum(row.get("highPrice")) or
-        _fnum(row.get("lowPrice"))
-    )
-
-    colors: List[str] = []
-    if ext_attr:
-        colors = [str(ext_attr)]
-
-    types: List[str] = []
-    for t in (ext_type, sub_type):
-        if t:
-            types.append(str(t))
-
-    info: Dict[str, Any] = {
-        "Name": name or "Unknown",
-        "Colors": colors,
-        "Types": types,
-        "Set": table.lower(),
-        "Price": price,
-        # Keep raw fields too
-        "extAttribute": row.get("extAttribute"),
-        "extCardType": row.get("extCardType"),
-        "extNumber": row.get("extNumber"),
-        "extRarity": row.get("extRarity"),
-        "extSubType": row.get("extSubType"),
-        "marketPrice": row.get("marketPrice"),
-        "midPrice": row.get("midPrice"),
-        "highPrice": row.get("highPrice"),
-        "lowPrice": row.get("lowPrice"),
-        "subTypeName": row.get("subTypeName"),
-    }
-    return info
-
-
-def extract_card_info(card_key: Any, db_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """
-    card_key can be:
-      - (table_name, id) tuple  ← what hashing.py returns
-      - "TABLE:ID" string (case-sensitive for table)
-      - plain id (int/str)  ← fallback: first match found across all tables
-    """
-    db_path = _db_path(db_name)
-    if not db_path:
-        return None
-
-    # Decode key
-    table: Optional[str] = None
-    rid: Optional[Any] = None
-    if isinstance(card_key, tuple) and len(card_key) == 2:
-        table, rid = card_key
-    elif isinstance(card_key, str) and ":" in card_key:
-        table, sid = card_key.split(":", 1)
-        try:
-            rid = int(sid)
-        except Exception:
-            rid = sid
+            with open(newest_file_path, 'r', encoding='utf-8') as f:
+                file_data = json.load(f)
+                CARDS_DATA.extend(file_data)
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON from {newest_file_path}: {e}")
+        except Exception as e:
+            print(f"An error occurred while reading {newest_file_path}: {e}")
     else:
-        rid = card_key
+        print(f"Error: The newest file path '{newest_file_path}' does not exist.")
+else:
+    print(f"No files matching the pattern '{default_files_pattern}' found.")
 
-    try:
-        with _open(db_path) as conn:
-            cur = conn.cursor()
 
-            def read_one(tbl: str, row_id: Any) -> Optional[Dict[str, Any]]:
-                try:
-                    cur.execute(f'SELECT * FROM "{tbl}" WHERE id = ? LIMIT 1', (row_id,))
-                    r = cur.fetchone()
-                    if r is None:
-                        return None
-                    col_names = [d[0] for d in cur.description]
-                    row_dict = {col_names[i]: r[i] for i in range(len(col_names))}
-                    return _normalize_row(tbl, row_dict)
-                except Exception:
-                    return None
+CARD_DATA_BY_ID = {c['id']: c for c in CARDS_DATA}
+total_entries_loaded = len(CARDS_DATA)
+print(f"Successfully loaded {total_entries_loaded} card entries from the newest default*.json file ({newest_file_path}).")
 
-            if table and rid is not None:
-                return read_one(table, rid)
-
-            # Fallback scan across all tables if table unknown
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            all_tables = [r[0] for r in cur.fetchall() if not r[0].startswith("sqlite_")]
-            for tbl in all_tables:
-                info = read_one(tbl, rid)
-                if info:
-                    return info
-
-            return None
-    except Exception:
+def extract_card_info(card_id):
+    card = CARD_DATA_BY_ID.get(card_id)
+    if not card:
         return None
+    name = card.get('name', 'Unknown')
+    set_code = card.get('set', '???')
+    colors = card.get('colors', [])
+    color_identity = card.get('color_identity', [])
+    cmc = card.get('cmc')
+    is_promo = card.get('Promo')
+    usd_price = card.get('prices', {}).get('usd')
+    price_str = "null"
+    mana_cost = card.get('mana_cost', '???')
+    if usd_price:
+        try:
+            price_str = f"${float(usd_price):.2f}"  # Simplified price formatting
+        except (ValueError, TypeError):  # Handle potential errors
+            pass
+    types = [t for t in ["creature", "artifact", "enchantment", "instant", "sorcery", "battle", "planeswalker", "land", "token"]
+             if t in card.get('type_line', '').lower()] # Simplified type extraction
+    return {
+        "Name": name,"Set": set_code,"Colors": colors,"Color Identity": color_identity,"CMC": cmc,"Types": types,"Price": price_str,"Promo": is_promo,"Mana Cost": mana_cost
+    }
 
-
-def card_is_allowed(card_key: Any, db_name: Optional[str] = None) -> bool:
-    """
-    Filter by excluded set codes. Here, the 'set' is effectively the table name.
-    """
-    info = extract_card_info(card_key, db_name=db_name)
-    if not info:
+def card_is_allowed(card_id):
+    card = CARD_DATA_BY_ID.get(card_id)
+    if not card:
         return False
-    set_code = str(info.get("Set", "")).lower()
-    return set_code not in {s.lower() for s in EXCLUDED_SETS}
+    set_code = card.get('set', '').lower()
+    games = card.get('games', [])
+    return 'paper' in games and set_code not in EXCLUDED_SETS  # Combined conditions
+
+def get_illustration_id(card_id):
+    card = CARD_DATA_BY_ID.get(card_id)
+    return card.get('illustration_id') if card else None  # Simplified
+
+def get_same_illustration_english_candidates(illustration_id):
+    return [  # List comprehension with combined conditions
+        c['id'] for c in CARDS_DATA
+        if c.get('illustration_id') == illustration_id and c.get('lang') == 'en' and
+           'paper' in c.get('games', []) and c.get('set', '').lower() not in EXCLUDED_SETS
+    ]
