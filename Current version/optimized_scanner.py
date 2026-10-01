@@ -232,6 +232,8 @@ class OptimizedCardScanner:
         self.serial_port = serial_port
         self.baud_rate = baud_rate
         self.ser = None
+        # Serialize complete command/reply exchanges across GUI threads.
+        self.serial_lock = threading.Lock()
         self.start_marker = 60  # '<'
         self.end_marker = 62    # '>'
         
@@ -301,23 +303,34 @@ class OptimizedCardScanner:
             return False
     
     def send_to_arduino(self, send_str):
-        """Send data to Arduino with proper encoding"""
+        """Send one Arduino command and receive its reply atomically."""
         if not self.ser or not send_str:
             return None
 
         try:
-            # Write the command
-            self.ser.write(send_str.encode('utf-8'))
-            print(f"[->] Sent to Arduino: {send_str}")
+            with self.serial_lock:
+                # Main.ino may leave a trailing <Arduino is ready> after the
+                # prior command.  Remove stale bytes before starting a new
+                # transaction so this caller reads only its own response.
+                try:
+                    if self.ser.in_waiting:
+                        self.ser.reset_input_buffer()
+                except Exception:
+                    pass
 
-            # Wait for one delimited response from Arduino (uses recv_from_arduino)
-            resp = self.recv_from_arduino()
-            if resp:
-                print(f"[<-] Arduino: {resp}")
-            else:
-                print(_elog('E406'))
+                self.ser.write(send_str.encode('utf-8'))
+                self.ser.flush()
+                print(f"[->] Sent to Arduino: {send_str}")
 
-            return resp
+                # Hold the lock through the read so monitor, scan, and manual
+                # control threads cannot consume one another's responses.
+                resp = self.recv_from_arduino()
+                if resp:
+                    print(f"[<-] Arduino: {resp}")
+                else:
+                    print(_elog('E406'))
+
+                return resp
         except Exception as e:
             print(_elog('E405', str(e)))
             return None
