@@ -2,43 +2,13 @@
 setlocal
 title Moss Machines Card Sorter
 
-REM Preferred repo locations on the Desktop
-set "APP_DIR=%USERPROFILE%\Desktop\Moss-Machines-Magic-the-Gathering-sorting\Current version"
+set "APP_DIR=C:\Sorter\Moss-Machines-Magic-the-Gathering-sorting\Current version"
+set "START_FILE=%APP_DIR%\gui_interface_enhanced.py"
 
-if not exist "%APP_DIR%\gui_interface_enhanced.py" (
-    set "APP_DIR=%USERPROFILE%\Desktop\Sorter-Development\Current version"
-)
-
-if not exist "%APP_DIR%\gui_interface_enhanced.py" (
-    set "APP_DIR=%USERPROFILE%\OneDrive\Desktop\Moss-Machines-Magic-the-Gathering-sorting\Current version"
-)
-
-if not exist "%APP_DIR%\gui_interface_enhanced.py" (
-    set "APP_DIR=%USERPROFILE%\OneDrive\Desktop\Sorter-Development\Current version"
-)
-
-REM Fallback: search Desktop for the GUI file
-if not exist "%APP_DIR%\gui_interface_enhanced.py" (
-    for /r "%USERPROFILE%\Desktop" %%F in (gui_interface_enhanced.py) do (
-        set "APP_DIR=%%~dpF"
-        goto :FOUND
-    )
-)
-
-REM Fallback: search OneDrive Desktop if present
-if not exist "%APP_DIR%\gui_interface_enhanced.py" (
-    if exist "%USERPROFILE%\OneDrive\Desktop" (
-        for /r "%USERPROFILE%\OneDrive\Desktop" %%F in (gui_interface_enhanced.py) do (
-            set "APP_DIR=%%~dpF"
-            goto :FOUND
-        )
-    )
-)
-
-:FOUND
-if not exist "%APP_DIR%\gui_interface_enhanced.py" (
+if not exist "%START_FILE%" (
     echo.
-    echo ERROR: Could not find gui_interface_enhanced.py on the Desktop.
+    echo ERROR: Sorter GUI not found at:
+    echo %START_FILE%
     echo.
     pause
     exit /b 1
