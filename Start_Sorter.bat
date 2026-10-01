@@ -2,7 +2,7 @@
 setlocal
 title Moss Machines Card Sorter
 
-set "APP_DIR=C:\Sorter\Moss-Machines-Magic-the-Gathering-sorting\Current version"
+set "APP_DIR=D:\Sorter\Moss-Machines-Magic-the-Gathering-sorting\Current version"
 set "START_FILE=%APP_DIR%\gui_interface_enhanced.py"
 
 if not exist "%START_FILE%" (
