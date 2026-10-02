@@ -93,6 +93,7 @@ void setup() {
   digitalWrite(Lights, HIGH);    //Lights on by default
 
   Serial.begin(9600);                        //Begin serial connection
+  Serial.setTimeout(100);                    //Keep GUI sensor queries responsive
   digitalWrite(13, HIGH);                    //Turn on the onboard LED for debugging
   while (!Serial) { delay(10); }             //Wait for serial to be ready
   Serial.println("Adafruit VL6180x test!");  //Print sensor initialization message
@@ -297,6 +298,7 @@ void DetermineAction() { //Figure out what to do
   // Manual controls only allowed when machine is stopped
   if (Tempval1 == "CalibrateX1" || Tempval1 == "CalibrateX2" ||
       Tempval1 == "CalibrateY1" || Tempval1 == "CalibrateY2" ||
+      Tempval1 == "CalibrateZ1" || Tempval1 == "CalibrateZ2" ||
       Tempval1 == "HomeButton") {
     if (machineStarted) {
       REPORT_ERROR(EC_CMD_STARTED, "Stop machine");
@@ -310,6 +312,8 @@ void DetermineAction() { //Figure out what to do
   } else if (Tempval1 == "CalibrateX2") {Move4(1,1,manualSteps,0);
   } else if (Tempval1 == "CalibrateY1") {Move4(0,0,0,manualSteps);
   } else if (Tempval1 == "CalibrateY2") {Move4(0,1,0,manualSteps);
+  } else if (Tempval1 == "CalibrateZ1") {Move1(0,manualSteps,zspeed);
+  } else if (Tempval1 == "CalibrateZ2") {Move1(1,manualSteps,zespeed);
   } else if (Tempval1 == "HomeButton") {Homemachine();atHomePosition = true;
   
   // Query sensor data
