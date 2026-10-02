@@ -19,8 +19,8 @@
 #define EC_HOME_X_FAIL        "E510"   // Homing failed: X endstop
 #define EC_HOME_Y_FAIL        "E511"   // Homing failed: Y endstop
 #define EC_HOME_Z_FAIL        "E512"   // Homing failed: Z endstop
-#define EC_BUF_OVERFLOW        "E513"   // Serial buffer overflow / truncation
-#define EC_UNKNOWN_CMD         "E514"   // Unrecognised command received
+#define EC_BUF_OVERFLOW       "E513"   // Serial buffer overflow / truncation
+#define EC_UNKNOWN_CMD        "E514"   // Unrecognised command received
 
 // Helper macro: sends a structured error over serial and shows code on LCD line 2
 // Usage: REPORT_ERROR(EC_TOF_NOT_FOUND, "No ToF sensor")
@@ -45,7 +45,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);        //LCD for user feedback
 
 //Flags and control variables
 boolean newData = false, readInProgress = false, newDataFromPC = false;
-boolean atHomePosition = true;  //Track if machine is at home position (safe for parameter changes)
+boolean atHomePosition = false; //Only true after a complete successful home cycle
 boolean machineStarted = false; //Track if machine is in Started state (accepting tray commands)
 byte bytesRecvd = 0, PickupRetry;
 const byte numChars = 64, buffSize = 40;                                               //Buffer sizes for serial communication
@@ -72,7 +72,7 @@ uint8_t range[6]; //Range readings from VL6180X sensor
 byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, Z_ENDSTOP_MAX;
 
 //Movement parameters (calibration and speed settings)
-short initial_pickup_distance = 6000, initial_drop_distance = 4000;  //Intial movement distances
+long initial_pickup_distance = 6000, initial_drop_distance = 4000;    //Initial Z movement distances
 short Xcal = 350, Ycal = 475, Zcal = 140;                            //Movement multipliers
 short speed = 700, zspeed = 75, zespeed = 120;                       //Movement speed (Higher number=slower speed)
 short pickup_threshold = 40, release_threshold = 40;                 //Thresholds for pickup/release conditions
@@ -103,7 +103,11 @@ void setup() {
     delay(1000);
   }  
   Serial.println("Sensor found!");PrintLCD("ToF sensor", "found");
-  Homemachine(); //Call Homemachine to calibrate the system
+  if (!Homemachine()) {
+    machineStarted = false;
+    atHomePosition = false;
+    PrintLCD("Home FAILED", "Manual recovery");
+  }
   delay(100);Serial.println("<Arduino is ready>");
 }
 
@@ -139,7 +143,6 @@ void loop() {
   }
   lcd.init();lcd.backlight();lcd.setCursor(0, 0); //Initialize LCD and turn on the backlight
   ReadEndstops(); //Read endstop values 
-  //if(Y_ENDSTOP_MIN==0||Z_ENDSTOP_MIN==0||X_ENDSTOP_MAX==0){PrintLCD("Endstop reached"," ");STOP==1;delay(100);}
   PrintLCD("Ready", " "); //Display "Ready" message on LCD 
   Tempval1 = Serial.readString();delay(10); //read any available data from the serial buffer
   if (Tempval1 != "") {
@@ -148,8 +151,6 @@ void loop() {
     Serial.println("<Arduino is ready>");
     timeoutcount = 0; //Reset timeout counter
   }  
-  //timeoutcount++;if(timeoutcount>=timeout){Tray(34);Serial.println("<Arduino is ready>");timeoutcount=0;}
-  //Serial.println(timeoutcount);
 
   //Reset flags
   Tempval1 = "";messageFromPC == "";bytesRecvd == 0;newData = false;readInProgress = false;newDataFromPC = false;
@@ -189,9 +190,9 @@ void parseData() {
 }
 
 //Handle the picking process, with retries
-void pick(short steps, byte Release) {PickupRetry = 0;
+void pick(long steps, byte Release) {PickupRetry = 0;
 retrypickup:
-  Move1(0, steps, zspeed);  //Move to pickup position
+  Move1(0, steps, zspeed);  //Move to pickup position; hard Z limits are enforced by Move1
   if (Release == 1) {MotorsOnOff(1);delay(100);digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);  //Turn motors off and release card
     while ((range[2] + range[3]) / 2 < release_threshold) {digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);}//Check range and if card didn't drop retry
     MotorsOnOff(0);delay(100);Move1(1, steps, zespeed);} //Turn motors back on and move back up
@@ -205,39 +206,72 @@ retrypickup:
     }//If 10 retrys failed stop the machine
 }  
 
-//Homing routine to calibrate the machine
-void Homemachine() {PrintLCD("Calibrating", " ");ReadEndstops();
-  // Z axis home
-  if (Z_ENDSTOP_MIN == 1) {
-    Move1(0, 800, zespeed);
-    unsigned long t0 = millis();
-    while (Z_ENDSTOP_MIN == 1) {
-      Move1(1, 3, zespeed); Z_ENDSTOP_MIN = digitalRead(Zmin);
-      if (millis() - t0 > 10000) { REPORT_ERROR(EC_HOME_Z_FAIL, "Z endstop"); break; }
+//Homing routine. Any timeout aborts the entire cycle.
+// Z seeks directly toward Z-min; there is no blind downward pre-move.
+boolean Homemachine() {
+  PrintLCD("Calibrating", " ");
+  machineStarted = false;
+  atHomePosition = false;
+  ReadEndstops();
+
+  // Z axis home: direction 1 is UP toward Z-min.
+  unsigned long t0 = millis();
+  while (digitalRead(Zmin) == HIGH) {
+    Move1(1, 3, zespeed);
+    if (millis() - t0 > 10000) {
+      REPORT_ERROR(EC_HOME_Z_FAIL, "Z endstop");
+      PrintLCD("E512 Z home", "Motion aborted");
+      return false;
     }
-    delay(200);
   }
+  ReadEndstops();
+  delay(200);
+
   // Y axis home
   if (Y_ENDSTOP_MIN == 1) {
     Move4(1, 0, 0, 50);
     unsigned long t1 = millis();
-    while (Y_ENDSTOP_MIN == 1) {
-      Move4(0, 1, 0, 5); Y_ENDSTOP_MIN = digitalRead(Ymin);
-      if (millis() - t1 > 10000) { REPORT_ERROR(EC_HOME_Y_FAIL, "Y endstop"); break; }
+    while (digitalRead(Ymin) == HIGH) {
+      Move4(0, 1, 0, 5);
+      if (millis() - t1 > 10000) {
+        REPORT_ERROR(EC_HOME_Y_FAIL, "Y endstop");
+        PrintLCD("E511 Y home", "Motion aborted");
+        return false;
+      }
     }
+    ReadEndstops();
     delay(200);
   }
+
   // X axis home
   if (X_ENDSTOP_MAX == 1) {
     Move4(1, 0, 50, 0);
     unsigned long t2 = millis();
-    while (X_ENDSTOP_MAX == 1) {
-      Move4(0, 1, 3, 0); X_ENDSTOP_MAX = digitalRead(Xmax);
-      if (millis() - t2 > 10000) { REPORT_ERROR(EC_HOME_X_FAIL, "X endstop"); break; }
+    while (digitalRead(Xmax) == HIGH) {
+      Move4(0, 1, 3, 0);
+      if (millis() - t2 > 10000) {
+        REPORT_ERROR(EC_HOME_X_FAIL, "X endstop");
+        PrintLCD("E510 X home", "Motion aborted");
+        return false;
+      }
     }
+    ReadEndstops();
     delay(200);
   }
-  Move1(0, 3000, zspeed); delay(200); Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38); delay(200);
+
+  // Move from switches to the normal sorter home position.
+  // Move1 will stop immediately if Z-max is reached unexpectedly.
+  if (!Move1(0, 3000L, zspeed)) {
+    REPORT_ERROR(EC_HOME_Z_FAIL, "Z lower limit");
+    PrintLCD("E512 Z limit", "Motion aborted");
+    return false;
+  }
+  delay(200);
+  Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38);
+  delay(200);
+
+  atHomePosition = true;
+  return true;
 }  
 
 void StopMachine() {
@@ -259,12 +293,12 @@ void MotorsOnOff(boolean OnOff) { //Turns all motors on or off
 
 void DetermineAction() { //Figure out what to do
   // Parse optional step count from manual movement commands (e.g. "CalibrateX1,10")
-  int manualSteps = 5; // default steps per button press
+  long manualSteps = 5; // default steps per button press
   int commaIdx = Tempval1.indexOf(',');
   if (commaIdx > 0) {
     String stepStr = Tempval1.substring(commaIdx + 1);
     stepStr.trim();
-    int parsed = stepStr.toInt();
+    long parsed = stepStr.toInt();
     if (parsed > 0) manualSteps = parsed;
     Tempval1 = Tempval1.substring(0, commaIdx); // strip suffix so equality checks below still work
   }
@@ -308,13 +342,16 @@ void DetermineAction() { //Figure out what to do
   }
   
   // Calibration commands (minor movements)
-  if (Tempval1 == "CalibrateX1") {Move4(0,1,manualSteps,0);
-  } else if (Tempval1 == "CalibrateX2") {Move4(1,1,manualSteps,0);
-  } else if (Tempval1 == "CalibrateY1") {Move4(0,0,0,manualSteps);
-  } else if (Tempval1 == "CalibrateY2") {Move4(0,1,0,manualSteps);
-  } else if (Tempval1 == "CalibrateZ1") {Move1(0,manualSteps,zspeed);
-  } else if (Tempval1 == "CalibrateZ2") {Move1(1,manualSteps,zespeed);
-  } else if (Tempval1 == "HomeButton") {Homemachine();atHomePosition = true;
+  if (Tempval1 == "CalibrateX1") {Move4(0,1,(short)manualSteps,0);
+  } else if (Tempval1 == "CalibrateX2") {Move4(1,1,(short)manualSteps,0);
+  } else if (Tempval1 == "CalibrateY1") {Move4(0,0,0,(short)manualSteps);
+  } else if (Tempval1 == "CalibrateY2") {Move4(0,1,0,(short)manualSteps);
+  } else if (Tempval1 == "CalibrateZ1") {
+    if (!Move1(0,manualSteps,zspeed)) {Serial.println("<Limit,ZMAX>");}
+  } else if (Tempval1 == "CalibrateZ2") {
+    if (!Move1(1,manualSteps,zespeed)) {Serial.println("<Limit,ZMIN>");}
+  } else if (Tempval1 == "HomeButton") {
+    Homemachine();
   
   // Query sensor data
   } else if (Tempval1 == "QuerySensors") {
@@ -426,18 +463,25 @@ void ForLoop(byte first, byte last) {
 void Tray(short var) {
   atHomePosition = false;  //Mark as not at home during tray operation
   Move1(0, initial_pickup_distance, zspeed);ReadRange(1); //Move the Z-axis to the initial pickup position and read the range
-  pick((range[0] + range[1]) / 2 * Zcal, 0);upcount++;CountArray[var]++; //Pick the card, Increment the total upcount and tray count
+  long pickupSteps = (long)((range[0] + range[1]) / 2) * (long)Zcal;
+  pick(pickupSteps, 0);upcount++;CountArray[var]++; //Pick the card, Increment the total upcount and tray count
   short x, y;
   //Determine the X and Y coordinates based on the tray number
   for (byte j = 0; j < 6; j++) {if (X[j / 2][j % 4] == var) {x = xOffsets[j];break;}}
   for (byte j = 0; j < 4; j++) {if (Y[j][0] == var) {y = yOffsets[j];break;}}
   int absX = abs(Xcal * x);int absY = abs(Ycal * y);
   int moveToDirectionX =   (x >= 0) ? 1 : 0; int moveToDirectionY =   (y >= 0) ? 0 : 1; Move4(moveToDirectionX,   moveToDirectionY,   absX, absY); // Move to coordinate
-  pick(initial_drop_distance, 1); ReadRange(5); while ((range[4] + range[5]) / 2 > 53) {Move1(1,5,zespeed);}
+  pick(initial_drop_distance, 1); ReadRange(5); while ((range[4] + range[5]) / 2 > 53) {if (!Move1(1,5,zespeed)) {break;}}
   int moveBackDirectionX = (x >= 0) ? 0 : 1; int moveBackDirectionY = (y >= 0) ? 1 : 0; Move4(moveBackDirectionX, moveBackDirectionY, absX, absY); // Move back to home tray
   Move1(1, initial_pickup_distance, zespeed); //Move Z back up to home position
   if (y != 0) { Move4(0, 0, 0, YCourseCorrection); } if (x != 0) { Move4(0, 1, XCourseCorrection, 0); } //Make course corrections if not 0
-  if (upcount % HCC == 0 && upcount >= HCC / 2) { Homemachine(); } //If HCC count reached, rehome the machine
+  if (upcount % HCC == 0 && upcount >= HCC / 2) {
+    if (!Homemachine()) {
+      machineStarted = false;
+      atHomePosition = false;
+      return;
+    }
+  }
   atHomePosition = true;  //Back at home position
 }
 
@@ -455,13 +499,32 @@ void Move4(boolean dir1, boolean dir3, short steps1, short steps2) {
   }
 }
 
-//Function to move along the Z-axis with a specified direction and steps
-void Move1(boolean dir, short steps, short speed1) {
+//Function to move along the Z-axis.
+// dir 0 = DOWN toward Z-max, dir 1 = UP toward Z-min.
+// Returns false when the requested direction reaches its hard limit.
+boolean Move1(boolean dir, long steps, short speed1) {
+  if (steps <= 0) { return true; }
+
   digitalWrite(Zdir, dir);
-  for (short i = 0; i < steps; i++) { //Loop to perform the movement
+  for (long i = 0; i < steps; i++) {
+    if (dir == 0) {
+      Z_ENDSTOP_MAX = digitalRead(Zmax);
+      if (Z_ENDSTOP_MAX == LOW) {
+        return false;
+      }
+    } else {
+      Z_ENDSTOP_MIN = digitalRead(Zmin);
+      if (Z_ENDSTOP_MIN == LOW) {
+        return false;
+      }
+    }
+
     digitalWrite(Zstep, HIGH); delayMicroseconds(speed1);
-    digitalWrite(Zstep,  LOW); delayMicroseconds(speed1);
+    digitalWrite(Zstep, LOW);  delayMicroseconds(speed1);
   }
+
+  ReadEndstops();
+  return true;
 }
 
 //Function to print a message to the LCD screen
