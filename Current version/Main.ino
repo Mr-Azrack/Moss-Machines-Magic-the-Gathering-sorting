@@ -218,7 +218,7 @@ boolean Homemachine() {
   unsigned long t0 = millis();
   while (digitalRead(Zmin) == HIGH) {
     Move1(1, 3, zespeed);
-    if (millis() - t0 > 10000) {
+    if (millis() - t0 > 60000UL) {
       REPORT_ERROR(EC_HOME_Z_FAIL, "Z endstop");
       PrintLCD("E512 Z home", "Motion aborted");
       return false;
@@ -305,6 +305,11 @@ void DetermineAction() { //Figure out what to do
 
   // Start/Stop commands
   if (Tempval1 == "StartMachine") {
+    if (!atHomePosition) {
+      REPORT_ERROR(EC_NOT_AT_HOME, "Home first");
+      PrintLCD("E509 Not home", "Home machine");
+      return;
+    }
     machineStarted = true;
     Serial.println("<OK,MachineStarted>");
     PrintLCD("Machine STARTED", "Accepting cards");
@@ -324,7 +329,7 @@ void DetermineAction() { //Figure out what to do
         PrintLCD("E507 Stopped", "Start machine!");
         return;
       }
-      match = 1; atHomePosition = false; ForLoop(loopStart[i], loopEnd[i]); atHomePosition = true; 
+      match = 1; atHomePosition = false; ForLoop(loopStart[i], loopEnd[i]);
       break;
     }
   }
