@@ -2,8 +2,31 @@
 setlocal
 title Moss Machines Card Sorter
 
-set "APP_DIR=D:\Sorter\Moss-Machines-Magic-the-Gathering-sorting\Current version"
+set "REPO_DIR=D:\Sorter\Moss-Machines-Magic-the-Gathering-sorting"
+set "APP_DIR=%REPO_DIR%\Current version"
 set "START_FILE=%APP_DIR%\gui_interface_enhanced.py"
+
+if not exist "%REPO_DIR%\.git" (
+    echo.
+    echo ERROR: Git repository not found at:
+    echo %REPO_DIR%
+    echo.
+    pause
+    exit /b 1
+)
+
+cd /d "%REPO_DIR%"
+
+echo Checking for sorter updates...
+git pull origin main
+if errorlevel 1 (
+    echo.
+    echo ERROR: Git update failed.
+    echo Fix the Git error above before starting the sorter.
+    echo.
+    pause
+    exit /b 1
+)
 
 if not exist "%START_FILE%" (
     echo.
