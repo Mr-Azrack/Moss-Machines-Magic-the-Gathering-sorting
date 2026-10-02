@@ -4,7 +4,7 @@ title Moss Machines Card Sorter
 
 set "REPO_DIR=D:\Sorter\Moss-Machines-Magic-the-Gathering-sorting"
 set "APP_DIR=%REPO_DIR%\Current version"
-set "START_FILE=%APP_DIR%\gui_interface_enhanced.py"
+set "START_FILE=%APP_DIR%\sorter_gui_main.py"
 
 if not exist "%REPO_DIR%\.git" (
     echo.
@@ -41,11 +41,11 @@ cd /d "%APP_DIR%"
 
 where py >nul 2>&1
 if %errorlevel%==0 (
-    py "gui_interface_enhanced.py"
+    py "sorter_gui_main.py"
 ) else (
     where python >nul 2>&1
     if %errorlevel%==0 (
-        python "gui_interface_enhanced.py"
+        python "sorter_gui_main.py"
     ) else (
         echo.
         echo ERROR: Python was not found in PATH.
