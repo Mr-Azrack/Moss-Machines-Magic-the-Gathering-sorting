@@ -134,7 +134,6 @@ void loop() {
   Tempval1 = Serial.readString();delay(10);
   Tempval1.trim();
   if (Tempval1 != "") {
-    Serial.println("<Received," + Tempval1 + ">");
     PrintLCD("Received: ", Tempval1);
     ReadRange(1);DetermineAction();
     Serial.println("<Arduino is ready>");
@@ -197,7 +196,6 @@ void Homemachine() {
   atHomePosition = false;
   ReadEndstops();
 
-  // Z axis home: move only upward toward the real Z-min switch.
   if (Z_ENDSTOP_MIN == 1) {
     unsigned long t0 = millis();
     while (Z_ENDSTOP_MIN == 1) {
