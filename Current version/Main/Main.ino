@@ -65,7 +65,7 @@ byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, 
 long zPositionSteps = 0;  // Signed Z steps relative to completed sorter home position.
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
-short Xcal = 350, Ycal = 475, Zcal = 140;
+short Xcal = 350, Ycal = 475, Zcal = 880;
 short speed = 700, zspeed = 75, zespeed = 120;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
@@ -259,11 +259,16 @@ void DetermineAction() {
   long manualSteps = 5;
   int commaIdx = Tempval1.indexOf(',');
   if (commaIdx > 0) {
-    String stepStr = Tempval1.substring(commaIdx + 1);
-    stepStr.trim();
-    long parsed = stepStr.toInt();
-    if (parsed > 0) manualSteps = parsed;
-    Tempval1 = Tempval1.substring(0, commaIdx);
+    String commandName = Tempval1.substring(0, commaIdx);
+    if (commandName == "CalibrateX1" || commandName == "CalibrateX2" ||
+        commandName == "CalibrateY1" || commandName == "CalibrateY2" ||
+        commandName == "CalibrateZ1" || commandName == "CalibrateZ2") {
+      String stepStr = Tempval1.substring(commaIdx + 1);
+      stepStr.trim();
+      long parsed = stepStr.toInt();
+      if (parsed > 0) manualSteps = parsed;
+      Tempval1 = commandName;
+    }
   }
 
   if (Tempval1 == "StartMachine") {
