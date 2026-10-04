@@ -62,6 +62,7 @@ String AssignedTrayValue[35], Tempval1;
 uint8_t range[6];
 
 byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, Z_ENDSTOP_MAX;
+long zPositionSteps = 0;  // Signed Z steps relative to completed sorter home position.
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
 short Xcal = 350, Ycal = 475, Zcal = 140;
@@ -233,6 +234,7 @@ void Homemachine() {
 
   Move1(0, 3000, zspeed); delay(200);
   Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38); delay(200);
+  zPositionSteps = 0;
   atHomePosition = true;
 }
 
@@ -318,6 +320,7 @@ void DetermineAction() {
     response += ",ymax=" + String(Y_ENDSTOP_MAX);
     response += ",zmin=" + String(Z_ENDSTOP_MIN);
     response += ",zmax=" + String(Z_ENDSTOP_MAX);
+    response += ",zsteps=" + String(zPositionSteps);
     response += ",home=" + String(atHomePosition ? 1 : 0);
     response += ",started=" + String(machineStarted ? 1 : 0);
     response += ">";
@@ -444,6 +447,11 @@ void Move1(boolean dir, long steps, short speed1) {
   for (long i = 0; i < steps; i++) {
     digitalWrite(Zstep, HIGH); delayMicroseconds(speed1);
     digitalWrite(Zstep, LOW); delayMicroseconds(speed1);
+    if (dir == 0) {
+      zPositionSteps++;
+    } else {
+      zPositionSteps--;
+    }
   }
 }
 
