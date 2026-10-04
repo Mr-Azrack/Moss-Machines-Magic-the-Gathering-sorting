@@ -17,6 +17,25 @@ if not exist "%REPO_DIR%\.git" (
 
 cd /d "%REPO_DIR%"
 
+echo Configuring sorter-only checkout...
+git sparse-checkout init --cone
+if errorlevel 1 (
+    echo.
+    echo ERROR: Could not enable Git sparse checkout.
+    echo.
+    pause
+    exit /b 1
+)
+
+git sparse-checkout set "Current version"
+if errorlevel 1 (
+    echo.
+    echo ERROR: Could not limit checkout to Current version.
+    echo.
+    pause
+    exit /b 1
+)
+
 echo Checking for sorter updates...
 git pull origin main
 if errorlevel 1 (
