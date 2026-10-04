@@ -112,7 +112,6 @@ void loop() {
   uint8_t status = vl.readRangeStatus();
   if (AssignedTrayValue[34] != "OverflowTray") {AssignedTrayValue[34] = "OverflowTray";}
   if (AssignedTrayValue[33] != "RejectCard") {AssignedTrayValue[33] = "RejectCard";}
-  getDataFromPC();
 
   if (status == VL6180X_ERROR_NONE) {ReadRange(1); Serial.print("Range: "); Serial.println((range[0] + range[1]) / 2);
   } else {PrintLCD("ToF: No range", " ");}
@@ -141,6 +140,7 @@ void loop() {
   ReadEndstops();
   PrintLCD("Ready", " ");
   Tempval1 = Serial.readString();delay(10);
+  Tempval1.trim();
   if (Tempval1 != "") {
     PrintLCD("Received: ", Tempval1);
     ReadRange(1);DetermineAction();
@@ -261,6 +261,7 @@ boolean Homemachine() {
   delay(200);
 
   atHomePosition = true;
+  PrintLCD("Ready", "Homed");
   return true;
 }
 
@@ -339,9 +340,17 @@ void DetermineAction() {
   } else if (Tempval1 == "CalibrateY1") {Move4(0,0,0,(short)manualSteps);
   } else if (Tempval1 == "CalibrateY2") {Move4(0,1,0,(short)manualSteps);
   } else if (Tempval1 == "CalibrateZ1") {
-    if (!Move1(0,manualSteps,zspeed)) {Serial.println("<Limit,ZSOFTMAX>");}
+    if (!Move1(0,manualSteps,zspeed)) {
+      Serial.println("<Limit,ZSOFTMAX>");
+    } else {
+      Serial.println("<OK,CalibrateZ1>");
+    }
   } else if (Tempval1 == "CalibrateZ2") {
-    if (!Move1(1,manualSteps,zespeed)) {Serial.println("<Limit,ZMIN>");}
+    if (!Move1(1,manualSteps,zespeed)) {
+      Serial.println("<Limit,ZMIN>");
+    } else {
+      Serial.println("<OK,CalibrateZ2>");
+    }
   } else if (Tempval1 == "HomeButton") {
     Homemachine();
 
