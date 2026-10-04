@@ -133,6 +133,7 @@ void loop() {
   Tempval1 = Serial.readString();delay(10);
   Tempval1.trim();
   if (Tempval1 != "") {
+    Serial.println("<Received," + Tempval1 + ">");
     PrintLCD("Received: ", Tempval1);
     ReadRange(1);DetermineAction();
     Serial.println("<Arduino is ready>");
@@ -389,9 +390,10 @@ void DetermineAction() {
     response += ">";
     Serial.println(response);
 
-  } else if (match = 1){match = 0;} else {
+  } else if (match == 1) {
+    match = 0;
+  } else {
     REPORT_ERROR(EC_UNKNOWN_CMD, Tempval1.substring(0,10));
-    ForLoop(1, 34);
   }
 }
 
