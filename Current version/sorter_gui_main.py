@@ -7,6 +7,7 @@ Adds:
 - Z- / Z+ manual jog controls using the existing step-size control.
 - Faster, thread-safe Arduino sensor monitoring.
 - Correct mapping of firmware endstop keys (xmin/xmax/etc.) to GUI labels.
+- Explicit Sort,<value> framing for card-routing commands.
 """
 
 import queue
@@ -25,6 +26,25 @@ _ENDSTOP_KEY_MAP = {
     "zmin": "z_min",
     "zmax": "z_max",
 }
+
+_CONTROL_COMMANDS = {
+    "StartMachine",
+    "StopMachine",
+    "HomeButton",
+    "QuerySensors",
+    "QueryParams",
+}
+
+_CONTROL_PREFIXES = (
+    "SetMotor,",
+    "SetParam,",
+    "CalibrateX1",
+    "CalibrateX2",
+    "CalibrateY1",
+    "CalibrateY2",
+    "CalibrateZ1",
+    "CalibrateZ2",
+)
 
 
 class ScannerGUI(BaseScannerGUI):
@@ -106,6 +126,21 @@ class ScannerGUI(BaseScannerGUI):
             return
 
         return super().send_arduino_command(cmd)
+
+    def _send_arduino(self, cmd):
+        """Frame card-routing values as explicit Sort commands."""
+        text = str(cmd or "").strip()
+        if not text:
+            return None
+
+        is_control = (
+            text in _CONTROL_COMMANDS
+            or text.startswith("Sort,")
+            or any(text.startswith(prefix) for prefix in _CONTROL_PREFIXES)
+        )
+
+        wire_cmd = text if is_control else f"Sort,{text}"
+        return super()._send_arduino(wire_cmd)
 
     def _queue_sensor_snapshot(self, snapshot):
         """Keep only the newest sensor snapshot so the display never falls behind."""
