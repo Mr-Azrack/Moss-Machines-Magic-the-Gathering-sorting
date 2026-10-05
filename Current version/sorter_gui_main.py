@@ -67,8 +67,8 @@ class ScannerGUI(BaseScannerGUI):
         # defaults so an Upload cannot accidentally restore older settings.
         try:
             self.param_vars["zcal"].set("935")
-            self.param_vars["zspeed"].set("50")
-            self.param_vars["zespeed"].set("70")
+            self.param_vars["zspeed"].set("40")
+            self.param_vars["zespeed"].set("55")
         except Exception:
             pass
 
