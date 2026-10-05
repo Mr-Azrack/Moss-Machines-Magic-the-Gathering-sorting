@@ -7,20 +7,20 @@
 // ERROR CODES — mirrors error_codes.py on the PC side
 // Format: <Error,EXXX,short description>
 // ============================================================
-#define EC_TOF_NOT_FOUND      "E501"   // ToF sensor not found on I2C
-#define EC_TOF_SYS_ERR        "E502"   // ToF system error
-#define EC_TOF_ECE            "E503"   // ToF ECE failure
-#define EC_TOF_NO_CONVERGE    "E504"   // ToF no convergence
-#define EC_PICKUP_RETRY       "E505"   // Pickup retry limit reached
-#define EC_OVERFLOW_FULL      "E506"   // Overflow tray full
-#define EC_CMD_NOT_STARTED    "E507"   // Tray command rejected: machine stopped
-#define EC_CMD_STARTED        "E508"   // Manual command rejected: machine running
-#define EC_NOT_AT_HOME        "E509"   // Parameter change rejected: not at home
-#define EC_HOME_X_FAIL        "E510"   // Homing failed: X endstop
-#define EC_HOME_Y_FAIL        "E511"   // Homing failed: Y endstop
-#define EC_HOME_Z_FAIL        "E512"   // Homing failed: Z endstop
-#define EC_BUF_OVERFLOW       "E513"   // Serial buffer overflow / truncation
-#define EC_UNKNOWN_CMD        "E514"   // Unrecognised command received
+#define EC_TOF_NOT_FOUND      "E501"
+#define EC_TOF_SYS_ERR        "E502"
+#define EC_TOF_ECE            "E503"
+#define EC_TOF_NO_CONVERGE    "E504"
+#define EC_PICKUP_RETRY       "E505"
+#define EC_OVERFLOW_FULL      "E506"
+#define EC_CMD_NOT_STARTED    "E507"
+#define EC_CMD_STARTED        "E508"
+#define EC_NOT_AT_HOME        "E509"
+#define EC_HOME_X_FAIL        "E510"
+#define EC_HOME_Y_FAIL        "E511"
+#define EC_HOME_Z_FAIL        "E512"
+#define EC_BUF_OVERFLOW       "E513"
+#define EC_UNKNOWN_CMD        "E514"
 
 #define REPORT_ERROR(code, msg) \
   do { \
@@ -42,6 +42,7 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 boolean newData = false, readInProgress = false, newDataFromPC = false;
 boolean atHomePosition = true;
 boolean machineStarted = false;
+boolean abortRequested = false;
 byte bytesRecvd = 0, PickupRetry;
 const byte numChars = 64, buffSize = 40;
 const char startMarker = '<', endMarker = '>';
@@ -54,7 +55,8 @@ const char* MatchingValues[] = {"RejectCard", "tray1", "tray7", "tray14", "tray1
 const int loopStart[] = {33, 1, 7, 14, 18, 25, 26, 27, 28, 29, 30, 31, 32};
 const int loopEnd[] = {33, 6, 13, 17, 24, 25, 26, 27, 28, 29, 30, 31, 32};
 boolean match = 0;
-const int xOffsets[6] = {-3, -2, -1, 1, 2, 3}; const int yOffsets[4] = {-2, -1, 1, 2};
+const int xOffsets[6] = {-3, -2, -1, 1, 2, 3};
+const int yOffsets[4] = {-2, -1, 1, 2};
 const short X[6][5]={{31,27,21,28,32},{23,11,9,12,24},{17,5,1,6,18},{19,7,2,8,20},{25,13,10,14,26},{33,29,22,30,34}};
 const short Y[4][7]={{32,24,18,16,20,26,34},{28,12,6,4,8,14,30},{27,11,5,3,7,13,29},{31,23,17,15,19,25,33}};
 short CountArray[35], upcount;
@@ -62,12 +64,15 @@ String AssignedTrayValue[35], Tempval1;
 uint8_t range[6];
 
 byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, Z_ENDSTOP_MAX;
-long zPositionSteps = 0;  // Signed Z steps relative to completed sorter home position.
-const long Z_SOFT_MAX_STEPS = 92500L;  // Hard lower travel limit; measured card contact is ~92100.
-const short PICKUP_CONTACT_MM = 5;     // ToF reading at cup/card contact fluctuates about 5-7 mm.
+long zPositionSteps = 0;
+const long Z_SOFT_MAX_STEPS = 92500L;
+const short PICKUP_CONTACT_MM = 5;
+const byte MAX_PICKUP_ATTEMPTS = 3;
+const byte MAX_RELEASE_PULSES = 5;
+const unsigned short PICKUP_VACUUM_BUILD_MS = 1000;
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
-short Xcal = 350, Ycal = 475, Zcal = 935;  // Zcal is calibrated Z steps per mm.
+short Xcal = 350, Ycal = 475, Zcal = 935;
 short speed = 700, zspeed = 75, zespeed = 120;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
@@ -95,9 +100,11 @@ void setup() {
     PrintLCD("E501 No ToF", "Check I2C wiring");
     delay(1000);
   }
-  Serial.println("Sensor found!");PrintLCD("ToF sensor", "found");
+  Serial.println("Sensor found!");
+  PrintLCD("ToF sensor", "found");
   Homemachine();
-  delay(100);Serial.println("<Arduino is ready>");
+  delay(100);
+  Serial.println("<Arduino is ready>");
 }
 
 void loop() {
@@ -105,8 +112,14 @@ void loop() {
   if (AssignedTrayValue[34] != "OverflowTray") {AssignedTrayValue[34] = "OverflowTray";}
   if (AssignedTrayValue[33] != "RejectCard") {AssignedTrayValue[33] = "RejectCard";}
 
-  if (status == VL6180X_ERROR_NONE) {ReadRange(1); Serial.print("Range: "); Serial.println((range[0] + range[1]) / 2);
-  } else {PrintLCD("ToF: No range", " ");}
+  if (status == VL6180X_ERROR_NONE) {
+    ReadRange(1);
+    Serial.print("Range: ");
+    Serial.println((range[0] + range[1]) / 2);
+  } else {
+    PrintLCD("ToF: No range", " ");
+  }
+
   switch (status) {
     case VL6180X_ERROR_SYSERR_1 ... VL6180X_ERROR_SYSERR_5:
       REPORT_ERROR(EC_TOF_SYS_ERR, "System error"); break;
@@ -129,20 +142,29 @@ void loop() {
     default: break;
   }
 
-  lcd.init();lcd.backlight();lcd.setCursor(0, 0);
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
   ReadEndstops();
   PrintLCD("Ready", " ");
 
-  Tempval1 = Serial.readString();delay(10);
+  Tempval1 = Serial.readString();
+  delay(10);
   Tempval1.trim();
   if (Tempval1 != "") {
     PrintLCD("Received: ", Tempval1);
-    ReadRange(1);DetermineAction();
+    ReadRange(1);
+    DetermineAction();
     Serial.println("<Arduino is ready>");
     timeoutcount = 0;
   }
 
-  Tempval1 = "";messageFromPC == "";bytesRecvd == 0;newData = false;readInProgress = false;newDataFromPC = false;
+  Tempval1 = "";
+  messageFromPC == "";
+  bytesRecvd == 0;
+  newData = false;
+  readInProgress = false;
+  newDataFromPC = false;
 }
 
 void getDataFromPC() {
@@ -177,20 +199,100 @@ void parseData() {
   strtokIndx = strtok(NULL, ",");
 }
 
-void pick(long steps, byte Release) {PickupRetry = 0;
-retrypickup:
-  Move1(0, steps, zspeed);
-  if (Release == 1) {MotorsOnOff(1);delay(100);digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);
-    while ((range[2] + range[3]) / 2 < release_threshold) {digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);}
-    MotorsOnOff(0);delay(100);Move1(1, steps, zespeed);}
-  if (Release == 0) {digitalWrite(Vacuum1, 1);delay(500);digitalWrite(Vacuum1,0);Move1(1, steps, zespeed);}ReadRange(3);
-    if (((range[2] + range[3]) / 2) > pickup_threshold) {
-      PickupRetry++;
-      if (PickupRetry >= 10) {
-        REPORT_ERROR(EC_PICKUP_RETRY, "10 retries failed");
-        StopMachine();
-      } else { goto retrypickup; }
+boolean checkEmergencyStop() {
+  if (abortRequested) return true;
+  if (!machineStarted || Serial.available() <= 0) return false;
+
+  String incoming = Serial.readString();
+  incoming.trim();
+  if (incoming == "StopMachine") {
+    abortRequested = true;
+    machineStarted = false;
+    digitalWrite(Vacuum1, LOW);
+    digitalWrite(Vacuum2, LOW);
+    Serial.println("<OK,MachineStopped>");
+    PrintLCD("STOPPED", "Cycle aborted");
+    return true;
+  }
+
+  return false;
+}
+
+boolean delayWithStop(unsigned long waitMs) {
+  unsigned long startedAt = millis();
+  while (millis() - startedAt < waitMs) {
+    if (abortRequested) return false;
+    if (machineStarted && checkEmergencyStop()) return false;
+    delay(10);
+  }
+  return true;
+}
+
+boolean pick(long steps, byte Release) {
+  if (Release == 1) {
+    Move1(0, steps, zspeed);
+    if (abortRequested) return false;
+
+    digitalWrite(Vacuum1, LOW);
+    if (!delayWithStop(100)) return false;
+
+    MotorsOnOff(1);
+    if (!delayWithStop(100)) return false;
+
+    for (byte releasePulse = 0; releasePulse < MAX_RELEASE_PULSES; releasePulse++) {
+      digitalWrite(Vacuum2, HIGH);
+      if (!delayWithStop(300)) {
+        digitalWrite(Vacuum2, LOW);
+        return false;
+      }
+      digitalWrite(Vacuum2, LOW);
+      ReadRange(3);
+      if (((range[2] + range[3]) / 2) >= release_threshold) break;
+      if (checkEmergencyStop()) return false;
     }
+
+    MotorsOnOff(0);
+    if (!delayWithStop(100)) return false;
+    Move1(1, steps, zespeed);
+    return !abortRequested;
+  }
+
+  PickupRetry = 0;
+  while (PickupRetry < MAX_PICKUP_ATTEMPTS) {
+    Move1(0, steps, zspeed);
+    if (abortRequested) return false;
+
+    digitalWrite(Vacuum1, HIGH);
+    if (!delayWithStop(PICKUP_VACUUM_BUILD_MS)) {
+      digitalWrite(Vacuum1, LOW);
+      return false;
+    }
+
+    Move1(1, steps, zespeed);
+    if (abortRequested) {
+      digitalWrite(Vacuum1, LOW);
+      return false;
+    }
+
+    ReadRange(3);
+    if (((range[2] + range[3]) / 2) <= pickup_threshold) {
+      // Successful pickup: Vac1 intentionally remains ON through X/Y travel.
+      return true;
+    }
+
+    digitalWrite(Vacuum1, LOW);
+    PickupRetry++;
+    if (PickupRetry < MAX_PICKUP_ATTEMPTS) {
+      if (!delayWithStop(150)) return false;
+    }
+  }
+
+  digitalWrite(Vacuum1, LOW);
+  digitalWrite(Vacuum2, LOW);
+  machineStarted = false;
+  REPORT_ERROR(EC_PICKUP_RETRY, "3 retries failed");
+  PrintLCD("E505 Pickup", "Cycle stopped");
+  return false;
 }
 
 void Homemachine() {
@@ -216,8 +318,12 @@ void Homemachine() {
     Move4(1, 0, 0, 50);
     unsigned long t1 = millis();
     while (Y_ENDSTOP_MIN == 1) {
-      Move4(0, 1, 0, 5); Y_ENDSTOP_MIN = digitalRead(Ymin);
-      if (millis() - t1 > 10000) { REPORT_ERROR(EC_HOME_Y_FAIL, "Y endstop"); break; }
+      Move4(0, 1, 0, 5);
+      Y_ENDSTOP_MIN = digitalRead(Ymin);
+      if (millis() - t1 > 10000) {
+        REPORT_ERROR(EC_HOME_Y_FAIL, "Y endstop");
+        break;
+      }
     }
     delay(200);
   }
@@ -226,32 +332,47 @@ void Homemachine() {
     Move4(1, 0, 50, 0);
     unsigned long t2 = millis();
     while (X_ENDSTOP_MAX == 1) {
-      Move4(0, 1, 3, 0); X_ENDSTOP_MAX = digitalRead(Xmax);
-      if (millis() - t2 > 10000) { REPORT_ERROR(EC_HOME_X_FAIL, "X endstop"); break; }
+      Move4(0, 1, 3, 0);
+      X_ENDSTOP_MAX = digitalRead(Xmax);
+      if (millis() - t2 > 10000) {
+        REPORT_ERROR(EC_HOME_X_FAIL, "X endstop");
+        break;
+      }
     }
     delay(200);
   }
 
-  Move1(0, 3000, zspeed); delay(200);
-  Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38); delay(200);
+  Move1(0, 3000, zspeed);
+  delay(200);
+  Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38);
+  delay(200);
   zPositionSteps = 0;
+  abortRequested = false;
   atHomePosition = true;
 }
 
 void StopMachine() {
-  REPORT_ERROR(EC_PICKUP_RETRY, "Machine halted");
-  PrintLCD("E505 Halted", "Empty and reset"); MotorsOnOff(0); while (1) { delay(10000);}
+  abortRequested = true;
+  machineStarted = false;
+  digitalWrite(Vacuum1, LOW);
+  digitalWrite(Vacuum2, LOW);
+  PrintLCD("STOPPED", "Cycle aborted");
 }
 
 void ReadEndstops() {
-  X_ENDSTOP_MIN = digitalRead(Xmin);X_ENDSTOP_MAX = digitalRead(Xmax);
-  Y_ENDSTOP_MIN = digitalRead(Ymin);Y_ENDSTOP_MAX = digitalRead(Ymax);
-  Z_ENDSTOP_MIN = digitalRead(Zmin);Z_ENDSTOP_MAX = digitalRead(Zmax);
+  X_ENDSTOP_MIN = digitalRead(Xmin);
+  X_ENDSTOP_MAX = digitalRead(Xmax);
+  Y_ENDSTOP_MIN = digitalRead(Ymin);
+  Y_ENDSTOP_MAX = digitalRead(Ymax);
+  Z_ENDSTOP_MIN = digitalRead(Zmin);
+  Z_ENDSTOP_MAX = digitalRead(Zmax);
 }
 
 void MotorsOnOff(boolean OnOff) {
-  digitalWrite(Xenable, OnOff);digitalWrite(E0enable, OnOff);
-  digitalWrite(Yenable, OnOff);digitalWrite(E1enable, OnOff);
+  digitalWrite(Xenable, OnOff);
+  digitalWrite(E0enable, OnOff);
+  digitalWrite(Yenable, OnOff);
+  digitalWrite(E1enable, OnOff);
   digitalWrite(Zenable, OnOff);
 }
 
@@ -268,9 +389,6 @@ void DetermineAction() {
     }
   }
 
-  // Card-routing values are explicit Sort commands.  This preserves the
-  // original dynamic tray assignment without treating arbitrary bad commands
-  // as movement requests.
   if (sortCommand) {
     if (!machineStarted) {
       REPORT_ERROR(EC_CMD_NOT_STARTED, "Start machine");
@@ -278,18 +396,20 @@ void DetermineAction() {
       return;
     }
 
+    abortRequested = false;
+
     for (int i = 0; i < sizeof(MatchingValues) / sizeof(MatchingValues[0]); ++i) {
       if (Tempval1 == MatchingValues[i]) {
         atHomePosition = false;
         ForLoop(loopStart[i], loopEnd[i]);
-        atHomePosition = true;
+        if (!abortRequested) atHomePosition = true;
         return;
       }
     }
 
     atHomePosition = false;
     ForLoop(1, 34);
-    atHomePosition = true;
+    if (!abortRequested) atHomePosition = true;
     return;
   }
 
@@ -309,18 +429,17 @@ void DetermineAction() {
   }
 
   if (Tempval1 == "StartMachine") {
+    abortRequested = false;
     machineStarted = true;
     Serial.println("<OK,MachineStarted>");
     PrintLCD("Machine STARTED", "Accepting cards");
     return;
   } else if (Tempval1 == "StopMachine") {
-    machineStarted = false;
+    StopMachine();
     Serial.println("<OK,MachineStopped>");
-    PrintLCD("Machine STOPPED", "Controls enabled");
     return;
   }
 
-  // Keep legacy fixed tray-range commands available for compatibility.
   for (int i = 0; i < sizeof(MatchingValues) / sizeof(MatchingValues[0]); ++i) {
     if (Tempval1 == MatchingValues[i]) {
       if (!machineStarted) {
@@ -328,7 +447,10 @@ void DetermineAction() {
         PrintLCD("E507 Stopped", "Start machine!");
         return;
       }
-      match = 1; atHomePosition = false; ForLoop(loopStart[i], loopEnd[i]); atHomePosition = true;
+      match = 1;
+      atHomePosition = false;
+      ForLoop(loopStart[i], loopEnd[i]);
+      if (!abortRequested) atHomePosition = true;
       break;
     }
   }
@@ -445,34 +567,61 @@ void DetermineAction() {
 
 void ForLoop(byte first, byte last) {
   for (byte i = first; i <= last; i++) {
-    if (AssignedTrayValue[i] == "") {AssignedTrayValue[i] = Tempval1;PrintLCD("Tray assigned ", Tempval1);delay(10);}
-    if (AssignedTrayValue[i] == Tempval1 && CountArray[i] <= 375) {Tray(i);Serial.println((String) "Went to tray" + i);break;}
-    else if (i == 34 && CountArray[34] < 375) {Tray(34);break;}
-    else if (i == 34 && CountArray[34] >= 375) {
+    if (abortRequested || !machineStarted) break;
+
+    if (AssignedTrayValue[i] == "") {
+      AssignedTrayValue[i] = Tempval1;
+      PrintLCD("Tray assigned ", Tempval1);
+      delay(10);
+    }
+
+    if (AssignedTrayValue[i] == Tempval1 && CountArray[i] <= 375) {
+      Tray(i);
+      if (!abortRequested && machineStarted) {
+        Serial.println((String) "Went to tray" + i);
+      }
+      break;
+    } else if (i == 34 && CountArray[34] < 375) {
+      Tray(34);
+      break;
+    } else if (i == 34 && CountArray[34] >= 375) {
       REPORT_ERROR(EC_OVERFLOW_FULL, "Tray 34 full");
-      StopMachine(); Tempval1 = ""; break;
+      StopMachine();
+      Tempval1 = "";
+      break;
     }
   }
 }
 
 void Tray(short var) {
   atHomePosition = false;
-  Move1(0, initial_pickup_distance, zspeed);ReadRange(1);
+  Move1(0, initial_pickup_distance, zspeed);
+  if (abortRequested) return;
+  ReadRange(1);
 
   long pickupRangeMm = ((long)range[0] + (long)range[1]) / 2L;
   long remainingMm = pickupRangeMm - (long)PICKUP_CONTACT_MM;
   if (remainingMm < 0) remainingMm = 0;
   long pickupSteps = remainingMm * (long)Zcal;
 
-  // Never ask the pickup move to pass the measured safe Z floor.
   long remainingSafeSteps = Z_SOFT_MAX_STEPS - zPositionSteps;
   if (remainingSafeSteps < 0) remainingSafeSteps = 0;
   if (pickupSteps > remainingSafeSteps) pickupSteps = remainingSafeSteps;
 
-  pick(pickupSteps, 0);upcount++;CountArray[var]++;
+  if (!pick(pickupSteps, 0)) {
+    // A normal pickup failure leaves Z at the initial 6000-step pickup height.
+    // Return to home height.  An emergency stop, however, stops immediately.
+    if (!abortRequested) {
+      Move1(1, initial_pickup_distance, zespeed);
+      zPositionSteps = 0;
+      atHomePosition = true;
+    }
+    return;
+  }
 
-  // The X and Y tables list every non-zero coordinate row.  Trays absent
-  // from an axis table are on that axis' center line, so start at zero.
+  upcount++;
+  CountArray[var]++;
+
   short x = 0, y = 0;
   boolean xFound = false, yFound = false;
 
@@ -496,32 +645,73 @@ void Tray(short var) {
     }
   }
 
-  int absX = abs(Xcal * x);int absY = abs(Ycal * y);
-  int moveToDirectionX =   (x >= 0) ? 1 : 0; int moveToDirectionY =   (y >= 0) ? 0 : 1; Move4(moveToDirectionX,   moveToDirectionY,   absX, absY);
-  pick(initial_drop_distance, 1); ReadRange(5); while ((range[4] + range[5]) / 2 > 53) {Move1(1,5,zespeed);}
-  int moveBackDirectionX = (x >= 0) ? 0 : 1; int moveBackDirectionY = (y >= 0) ? 1 : 0; Move4(moveBackDirectionX, moveBackDirectionY, absX, absY);
+  int absX = abs(Xcal * x);
+  int absY = abs(Ycal * y);
+  int moveToDirectionX = (x >= 0) ? 1 : 0;
+  int moveToDirectionY = (y >= 0) ? 0 : 1;
+  Move4(moveToDirectionX, moveToDirectionY, absX, absY);
+  if (abortRequested) return;
+
+  if (!pick(initial_drop_distance, 1)) return;
+  if (abortRequested) return;
+
+  ReadRange(5);
+  while ((range[4] + range[5]) / 2 > 53) {
+    Move1(1, 5, zespeed);
+    if (abortRequested) return;
+    ReadRange(5);
+  }
+
+  int moveBackDirectionX = (x >= 0) ? 0 : 1;
+  int moveBackDirectionY = (y >= 0) ? 1 : 0;
+  Move4(moveBackDirectionX, moveBackDirectionY, absX, absY);
+  if (abortRequested) return;
+
   Move1(1, initial_pickup_distance, zespeed);
-  if (y != 0) { Move4(0, 0, 0, YCourseCorrection); } if (x != 0) { Move4(0, 1, XCourseCorrection, 0); }
-  if (upcount % HCC == 0 && upcount >= HCC / 2) { Homemachine(); }
+  if (abortRequested) return;
+
+  if (y != 0) { Move4(0, 0, 0, YCourseCorrection); }
+  if (x != 0) { Move4(0, 1, XCourseCorrection, 0); }
+  if (abortRequested) return;
+
+  if (upcount % HCC == 0 && upcount >= HCC / 2) {
+    Homemachine();
+  }
   atHomePosition = true;
 }
 
 void Move4(boolean dir1, boolean dir3, short steps1, short steps2) {
   boolean dir2;
-  if (dir1 == 0) {dir2 = 1;}else{dir2 = 0;}
-  digitalWrite(Xdir, dir1); digitalWrite(E0dir, dir2); digitalWrite(Ydir, dir3); digitalWrite(E1dir, dir3);
+  if (dir1 == 0) {dir2 = 1;} else {dir2 = 0;}
+  digitalWrite(Xdir, dir1);
+  digitalWrite(E0dir, dir2);
+  digitalWrite(Ydir, dir3);
+  digitalWrite(E1dir, dir3);
+
   for (short i = 0; (i < steps1 || i < steps2); i++) {
-    if (i < steps1) {digitalWrite(Xstep, HIGH); digitalWrite(E0step, HIGH);}
-    if (i < steps2) {digitalWrite(Ystep, HIGH); digitalWrite(E1step, HIGH);}
+    if (abortRequested) break;
+    if (machineStarted && (i % 25 == 0) && checkEmergencyStop()) break;
+
+    if (i < steps1) {
+      digitalWrite(Xstep, HIGH);
+      digitalWrite(E0step, HIGH);
+    }
+    if (i < steps2) {
+      digitalWrite(Ystep, HIGH);
+      digitalWrite(E1step, HIGH);
+    }
     delayMicroseconds(speed);
-    digitalWrite(Xstep, LOW); digitalWrite(E0step, LOW); digitalWrite(Ystep, LOW); digitalWrite(E1step, LOW);
+    digitalWrite(Xstep, LOW);
+    digitalWrite(E0step, LOW);
+    digitalWrite(Ystep, LOW);
+    digitalWrite(E1step, LOW);
     delayMicroseconds(speed);
   }
 }
 
 void Move1(boolean dir, long steps, short speed1) {
-  // Z has no physical lower limit switch.  Clamp every downward move so a
-  // bad ToF value or manual command cannot run the carriage off the screw.
+  if (abortRequested) return;
+
   if (dir == 0) {
     long availableSteps = Z_SOFT_MAX_STEPS - zPositionSteps;
     if (availableSteps <= 0) {
@@ -533,8 +723,14 @@ void Move1(boolean dir, long steps, short speed1) {
 
   digitalWrite(Zdir, dir);
   for (long i = 0; i < steps; i++) {
-    digitalWrite(Zstep, HIGH); delayMicroseconds(speed1);
-    digitalWrite(Zstep, LOW); delayMicroseconds(speed1);
+    if (abortRequested) break;
+    if (machineStarted && (i % 200L == 0) && checkEmergencyStop()) break;
+
+    digitalWrite(Zstep, HIGH);
+    delayMicroseconds(speed1);
+    digitalWrite(Zstep, LOW);
+    delayMicroseconds(speed1);
+
     if (dir == 0) {
       zPositionSteps++;
     } else {
@@ -544,10 +740,16 @@ void Move1(boolean dir, long steps, short speed1) {
 }
 
 void PrintLCD(String var1, String var2) {
-  lcd.clear(); lcd.setCursor(0, 0); lcd.print(var1); lcd.setCursor(0, 1); lcd.print(var2);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(var1);
+  lcd.setCursor(0, 1);
+  lcd.print(var2);
 }
 
 void ReadRange(byte var1) {
-    range[var1 - 1] = vl.readRange(); delay(10);
-    range[var1] = vl.readRange(); delay(10);
+  range[var1 - 1] = vl.readRange();
+  delay(10);
+  range[var1] = vl.readRange();
+  delay(10);
 }
