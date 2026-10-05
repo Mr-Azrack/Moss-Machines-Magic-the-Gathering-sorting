@@ -650,13 +650,6 @@ void Tray(short var) {
   if (!pick(initial_drop_distance, 1)) return;
   if (abortRequested) return;
 
-  ReadRange(5);
-  while ((range[4] + range[5]) / 2 > 53) {
-    Move1(1, 5, zespeed);
-    if (abortRequested) return;
-    ReadRange(5);
-  }
-
   int moveBackDirectionX = (x >= 0) ? 0 : 1;
   int moveBackDirectionY = (y >= 0) ? 1 : 0;
   Move4(moveBackDirectionX, moveBackDirectionY, absX, absY);
