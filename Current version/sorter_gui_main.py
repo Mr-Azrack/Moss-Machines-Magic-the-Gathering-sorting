@@ -63,9 +63,9 @@ class ScannerGUI(BaseScannerGUI):
         super()._setup_arduino_tab(parent)
 
         # Keep the GUI's initial value aligned with the calibrated firmware
-        # default so an Upload cannot accidentally restore the old Z Cal 140.
+        # default so an Upload cannot accidentally restore an old Z calibration.
         try:
-            self.param_vars["zcal"].set("880")
+            self.param_vars["zcal"].set("935")
         except Exception:
             pass
 
