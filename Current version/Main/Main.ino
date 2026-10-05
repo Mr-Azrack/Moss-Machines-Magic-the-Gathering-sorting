@@ -458,9 +458,32 @@ void Tray(short var) {
   Move1(0, initial_pickup_distance, zspeed);ReadRange(1);
   long pickupSteps = ((long)(range[0] + range[1]) / 2L) * (long)Zcal;
   pick(pickupSteps, 0);upcount++;CountArray[var]++;
-  short x, y;
-  for (byte j = 0; j < 6; j++) {if (X[j / 2][j % 4] == var) {x = xOffsets[j];break;}}
-  for (byte j = 0; j < 4; j++) {if (Y[j][0] == var) {y = yOffsets[j];break;}}
+
+  // The X and Y tables list every non-zero coordinate row.  Trays absent
+  // from an axis table are on that axis' center line, so start at zero.
+  short x = 0, y = 0;
+  boolean xFound = false, yFound = false;
+
+  for (byte row = 0; row < 6 && !xFound; row++) {
+    for (byte col = 0; col < 5; col++) {
+      if (X[row][col] == var) {
+        x = xOffsets[row];
+        xFound = true;
+        break;
+      }
+    }
+  }
+
+  for (byte row = 0; row < 4 && !yFound; row++) {
+    for (byte col = 0; col < 7; col++) {
+      if (Y[row][col] == var) {
+        y = yOffsets[row];
+        yFound = true;
+        break;
+      }
+    }
+  }
+
   int absX = abs(Xcal * x);int absY = abs(Ycal * y);
   int moveToDirectionX =   (x >= 0) ? 1 : 0; int moveToDirectionY =   (y >= 0) ? 0 : 1; Move4(moveToDirectionX,   moveToDirectionY,   absX, absY);
   pick(initial_drop_distance, 1); ReadRange(5); while ((range[4] + range[5]) / 2 > 53) {Move1(1,5,zespeed);}
