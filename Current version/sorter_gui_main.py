@@ -9,6 +9,7 @@ Adds:
 - Correct mapping of firmware endstop keys (xmin/xmax/etc.) to GUI labels.
 - Explicit Sort,<value> framing for card-routing commands.
 - A longer serial reply window while a physical sort is in progress.
+- An immediate StopMachine write that can interrupt an active sort transaction.
 """
 
 import queue
@@ -136,6 +137,35 @@ class ScannerGUI(BaseScannerGUI):
             return
 
         return super().send_arduino_command(cmd)
+
+    def stop_machine(self):
+        """Send StopMachine immediately, even while a sort owns the serial lock."""
+        serial_obj = None
+        try:
+            if self.scanner:
+                serial_obj = getattr(self.scanner, "ser", None)
+        except Exception:
+            serial_obj = None
+
+        if serial_obj is None:
+            return super().stop_machine()
+
+        try:
+            # Do not use scanner.send_to_arduino() here.  A running Sort command
+            # holds its transaction lock while waiting for the physical cycle to
+            # finish.  Writing directly lets the firmware see StopMachine now.
+            serial_obj.write(b"StopMachine")
+            serial_obj.flush()
+
+            self.machine_started = False
+            self.machine_state_label.configure(text="● STOPPED", fg="#ff4444")
+            self.start_machine_btn.configure(state=tk.NORMAL)
+            self.stop_machine_btn.configure(state=tk.DISABLED)
+            self._update_controls_state()
+            self.log_status("✓ EMERGENCY STOP sent to Arduino")
+        except Exception as exc:
+            self.log_status(f"✗ Emergency stop failed: {exc}", error=True)
+            self.log_error("E405", f"StopMachine:{exc}")
 
     def _send_arduino(self, cmd):
         """Frame card-routing values as explicit Sort commands."""
