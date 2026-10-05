@@ -8,6 +8,7 @@ Adds:
 - Faster, thread-safe Arduino sensor monitoring.
 - Correct mapping of firmware endstop keys (xmin/xmax/etc.) to GUI labels.
 - Explicit Sort,<value> framing for card-routing commands.
+- A longer serial reply window while a physical sort is in progress.
 """
 
 import queue
@@ -45,6 +46,8 @@ _CONTROL_PREFIXES = (
     "CalibrateZ1",
     "CalibrateZ2",
 )
+
+_SORT_REPLY_TIMEOUT_SECONDS = 120
 
 
 class ScannerGUI(BaseScannerGUI):
@@ -140,7 +143,31 @@ class ScannerGUI(BaseScannerGUI):
         )
 
         wire_cmd = text if is_control else f"Sort,{text}"
-        return super()._send_arduino(wire_cmd)
+
+        # A calibrated sort now contains roughly 92k Z steps down and back up,
+        # plus X/Y travel and card release.  Keep the scan transaction locked
+        # until the Arduino reports completion so the same card cannot be
+        # rescanned and the live monitor cannot consume the sort reply.
+        serial_obj = None
+        old_timeout = None
+        if wire_cmd.startswith("Sort,"):
+            try:
+                serial_obj = getattr(self.scanner, "ser", None)
+                if serial_obj is not None:
+                    old_timeout = serial_obj.timeout
+                    serial_obj.timeout = _SORT_REPLY_TIMEOUT_SECONDS
+            except Exception:
+                serial_obj = None
+                old_timeout = None
+
+        try:
+            return super()._send_arduino(wire_cmd)
+        finally:
+            if serial_obj is not None and old_timeout is not None:
+                try:
+                    serial_obj.timeout = old_timeout
+                except Exception:
+                    pass
 
     def _queue_sensor_snapshot(self, snapshot):
         """Keep only the newest sensor snapshot so the display never falls behind."""
