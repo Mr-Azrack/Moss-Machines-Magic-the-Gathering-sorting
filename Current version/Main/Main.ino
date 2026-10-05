@@ -68,12 +68,12 @@ long zPositionSteps = 0;
 const long Z_SOFT_MAX_STEPS = 92500L;
 const short PICKUP_CONTACT_MM = 5;
 const byte MAX_PICKUP_ATTEMPTS = 3;
-const byte MAX_RELEASE_PULSES = 5;
 const unsigned short PICKUP_VACUUM_BUILD_MS = 1000;
+const unsigned short RELEASE_PULSE_MS = 250;
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
 short Xcal = 350, Ycal = 475, Zcal = 935;
-short speed = 700, zspeed = 75, zespeed = 120;
+short speed = 700, zspeed = 50, zespeed = 70;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
 
@@ -239,17 +239,12 @@ boolean pick(long steps, byte Release) {
     MotorsOnOff(1);
     if (!delayWithStop(100)) return false;
 
-    for (byte releasePulse = 0; releasePulse < MAX_RELEASE_PULSES; releasePulse++) {
-      digitalWrite(Vacuum2, HIGH);
-      if (!delayWithStop(300)) {
-        digitalWrite(Vacuum2, LOW);
-        return false;
-      }
+    digitalWrite(Vacuum2, HIGH);
+    if (!delayWithStop(RELEASE_PULSE_MS)) {
       digitalWrite(Vacuum2, LOW);
-      ReadRange(3);
-      if (((range[2] + range[3]) / 2) >= release_threshold) break;
-      if (checkEmergencyStop()) return false;
+      return false;
     }
+    digitalWrite(Vacuum2, LOW);
 
     MotorsOnOff(0);
     if (!delayWithStop(100)) return false;
