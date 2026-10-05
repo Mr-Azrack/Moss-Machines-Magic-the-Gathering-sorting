@@ -62,6 +62,13 @@ class ScannerGUI(BaseScannerGUI):
         """Build the existing Arduino tab, then add Z jog controls."""
         super()._setup_arduino_tab(parent)
 
+        # Keep the GUI's initial value aligned with the calibrated firmware
+        # default so an Upload cannot accidentally restore the old Z Cal 140.
+        try:
+            self.param_vars["zcal"].set("880")
+        except Exception:
+            pass
+
         # The first X/Y movement button's parent is the existing movement grid.
         # Reuse that exact grid so layout and enable/disable behavior stay intact.
         try:
