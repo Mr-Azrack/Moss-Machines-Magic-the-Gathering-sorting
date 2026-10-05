@@ -175,7 +175,7 @@ void parseData() {
   strtokIndx = strtok(NULL, ",");
 }
 
-void pick(short steps, byte Release) {PickupRetry = 0;
+void pick(long steps, byte Release) {PickupRetry = 0;
 retrypickup:
   Move1(0, steps, zspeed);
   if (Release == 1) {MotorsOnOff(1);delay(100);digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);
@@ -254,6 +254,43 @@ void MotorsOnOff(boolean OnOff) {
 }
 
 void DetermineAction() {
+  boolean sortCommand = false;
+  if (Tempval1.startsWith("Sort,")) {
+    Tempval1 = Tempval1.substring(5);
+    Tempval1.trim();
+    sortCommand = true;
+
+    if (Tempval1.length() == 0) {
+      REPORT_ERROR(EC_UNKNOWN_CMD, "Empty sort");
+      return;
+    }
+  }
+
+  // Card-routing values are explicit Sort commands.  This preserves the
+  // original dynamic tray assignment without treating arbitrary bad commands
+  // as movement requests.
+  if (sortCommand) {
+    if (!machineStarted) {
+      REPORT_ERROR(EC_CMD_NOT_STARTED, "Start machine");
+      PrintLCD("E507 Stopped", "Start machine!");
+      return;
+    }
+
+    for (int i = 0; i < sizeof(MatchingValues) / sizeof(MatchingValues[0]); ++i) {
+      if (Tempval1 == MatchingValues[i]) {
+        atHomePosition = false;
+        ForLoop(loopStart[i], loopEnd[i]);
+        atHomePosition = true;
+        return;
+      }
+    }
+
+    atHomePosition = false;
+    ForLoop(1, 34);
+    atHomePosition = true;
+    return;
+  }
+
   long manualSteps = 5;
   int commaIdx = Tempval1.indexOf(',');
   if (commaIdx > 0) {
@@ -281,6 +318,7 @@ void DetermineAction() {
     return;
   }
 
+  // Keep legacy fixed tray-range commands available for compatibility.
   for (int i = 0; i < sizeof(MatchingValues) / sizeof(MatchingValues[0]); ++i) {
     if (Tempval1 == MatchingValues[i]) {
       if (!machineStarted) {
@@ -418,7 +456,8 @@ void ForLoop(byte first, byte last) {
 void Tray(short var) {
   atHomePosition = false;
   Move1(0, initial_pickup_distance, zspeed);ReadRange(1);
-  pick((range[0] + range[1]) / 2 * Zcal, 0);upcount++;CountArray[var]++;
+  long pickupSteps = ((long)(range[0] + range[1]) / 2L) * (long)Zcal;
+  pick(pickupSteps, 0);upcount++;CountArray[var]++;
   short x, y;
   for (byte j = 0; j < 6; j++) {if (X[j / 2][j % 4] == var) {x = xOffsets[j];break;}}
   for (byte j = 0; j < 4; j++) {if (Y[j][0] == var) {y = yOffsets[j];break;}}
