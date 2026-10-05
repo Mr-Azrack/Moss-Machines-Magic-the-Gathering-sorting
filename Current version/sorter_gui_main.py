@@ -63,10 +63,12 @@ class ScannerGUI(BaseScannerGUI):
         """Build the existing Arduino tab, then add Z jog controls."""
         super()._setup_arduino_tab(parent)
 
-        # Keep the GUI's initial value aligned with the calibrated firmware
-        # default so an Upload cannot accidentally restore an old Z calibration.
+        # Keep the GUI's initial Z values aligned with the calibrated firmware
+        # defaults so an Upload cannot accidentally restore older settings.
         try:
             self.param_vars["zcal"].set("935")
+            self.param_vars["zspeed"].set("50")
+            self.param_vars["zespeed"].set("70")
         except Exception:
             pass
 
