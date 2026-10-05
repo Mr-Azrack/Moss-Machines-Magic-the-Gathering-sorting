@@ -63,9 +63,11 @@ uint8_t range[6];
 
 byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, Z_ENDSTOP_MAX;
 long zPositionSteps = 0;  // Signed Z steps relative to completed sorter home position.
+const long Z_SOFT_MAX_STEPS = 92500L;  // Hard lower travel limit; measured card contact is ~92100.
+const short PICKUP_CONTACT_MM = 5;     // ToF reading at cup/card contact fluctuates about 5-7 mm.
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
-short Xcal = 350, Ycal = 475, Zcal = 880;
+short Xcal = 350, Ycal = 475, Zcal = 935;  // Zcal is calibrated Z steps per mm.
 short speed = 700, zspeed = 75, zespeed = 120;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
@@ -181,7 +183,7 @@ retrypickup:
   if (Release == 1) {MotorsOnOff(1);delay(100);digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);
     while ((range[2] + range[3]) / 2 < release_threshold) {digitalWrite(Vacuum2,1);delay(300);digitalWrite(Vacuum2,0);ReadRange(3);}
     MotorsOnOff(0);delay(100);Move1(1, steps, zespeed);}
-  if (Release == 0) {digitalWrite(Vacuum1, 1);delay(500);digitalWrite(Vacuum1, 0);Move1(1, steps, zespeed);}ReadRange(3);
+  if (Release == 0) {digitalWrite(Vacuum1, 1);delay(500);digitalWrite(Vacuum1,0);Move1(1, steps, zespeed);}ReadRange(3);
     if (((range[2] + range[3]) / 2) > pickup_threshold) {
       PickupRetry++;
       if (PickupRetry >= 10) {
@@ -456,7 +458,17 @@ void ForLoop(byte first, byte last) {
 void Tray(short var) {
   atHomePosition = false;
   Move1(0, initial_pickup_distance, zspeed);ReadRange(1);
-  long pickupSteps = ((long)(range[0] + range[1]) / 2L) * (long)Zcal;
+
+  long pickupRangeMm = ((long)range[0] + (long)range[1]) / 2L;
+  long remainingMm = pickupRangeMm - (long)PICKUP_CONTACT_MM;
+  if (remainingMm < 0) remainingMm = 0;
+  long pickupSteps = remainingMm * (long)Zcal;
+
+  // Never ask the pickup move to pass the measured safe Z floor.
+  long remainingSafeSteps = Z_SOFT_MAX_STEPS - zPositionSteps;
+  if (remainingSafeSteps < 0) remainingSafeSteps = 0;
+  if (pickupSteps > remainingSafeSteps) pickupSteps = remainingSafeSteps;
+
   pick(pickupSteps, 0);upcount++;CountArray[var]++;
 
   // The X and Y tables list every non-zero coordinate row.  Trays absent
@@ -508,6 +520,17 @@ void Move4(boolean dir1, boolean dir3, short steps1, short steps2) {
 }
 
 void Move1(boolean dir, long steps, short speed1) {
+  // Z has no physical lower limit switch.  Clamp every downward move so a
+  // bad ToF value or manual command cannot run the carriage off the screw.
+  if (dir == 0) {
+    long availableSteps = Z_SOFT_MAX_STEPS - zPositionSteps;
+    if (availableSteps <= 0) {
+      Serial.println("Z soft limit reached");
+      return;
+    }
+    if (steps > availableSteps) steps = availableSteps;
+  }
+
   digitalWrite(Zdir, dir);
   for (long i = 0; i < steps; i++) {
     digitalWrite(Zstep, HIGH); delayMicroseconds(speed1);
