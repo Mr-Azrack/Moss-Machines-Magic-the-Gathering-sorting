@@ -10,12 +10,13 @@ Adds:
 - Explicit Sort,<value> framing for card-routing commands.
 - A longer serial reply window while a physical sort is in progress.
 - An immediate StopMachine write that can interrupt an active sort transaction.
+- A touchscreen-friendly detected COM-port dropdown with Refresh.
 """
 
 import queue
 import time
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 from gui_interface_enhanced import ScannerGUI as BaseScannerGUI
 
@@ -60,8 +61,13 @@ class ScannerGUI(BaseScannerGUI):
         self.root.after(50, self._drain_sensor_queue)
 
     def _setup_arduino_tab(self, parent):
-        """Build the existing Arduino tab, then add Z jog controls."""
+        """Build the existing Arduino tab, then add sorter-specific controls."""
         super()._setup_arduino_tab(parent)
+
+        # Replace the original typed COM entry with a detected-port selector.
+        # The same serial_port_var is preserved, so existing connection logic is
+        # unchanged and no keyboard is required for normal use.
+        self._install_serial_port_selector(parent)
 
         # Keep the GUI's initial Z values aligned with the calibrated firmware
         # defaults so an Upload cannot accidentally restore older settings.
@@ -123,6 +129,115 @@ class ScannerGUI(BaseScannerGUI):
                 self.log_status(f"Z jog control setup failed: {exc}", error=True)
             except Exception:
                 pass
+
+    def _walk_widgets(self, parent):
+        """Yield all descendants of a Tk widget."""
+        for child in parent.winfo_children():
+            yield child
+            yield from self._walk_widgets(child)
+
+    def _install_serial_port_selector(self, parent):
+        """Replace the base GUI's COM text entry with a readonly dropdown."""
+        try:
+            target_var = str(self.serial_port_var)
+            port_entry = None
+
+            for widget in self._walk_widgets(parent):
+                if not isinstance(widget, tk.Entry):
+                    continue
+                try:
+                    if str(widget.cget("textvariable")) == target_var:
+                        port_entry = widget
+                        break
+                except Exception:
+                    continue
+
+            if port_entry is None:
+                self.log_status("COM selector setup: port entry not found", error=True)
+                return
+
+            holder = port_entry.master
+            siblings = list(holder.winfo_children())
+            try:
+                entry_index = siblings.index(port_entry)
+            except ValueError:
+                entry_index = -1
+
+            before_widget = None
+            if entry_index >= 0 and entry_index + 1 < len(siblings):
+                before_widget = siblings[entry_index + 1]
+
+            port_entry.destroy()
+
+            self.serial_port_combo = ttk.Combobox(
+                holder,
+                textvariable=self.serial_port_var,
+                state="readonly",
+                width=12,
+                font=("Arial", 11),
+            )
+            combo_pack = {"side": tk.LEFT, "padx": 3, "ipady": 3}
+            if before_widget is not None:
+                combo_pack["before"] = before_widget
+            self.serial_port_combo.pack(**combo_pack)
+
+            self.serial_port_refresh_btn = tk.Button(
+                holder,
+                text="↻ Refresh",
+                command=self._refresh_serial_ports,
+                bg="#455A64",
+                fg="white",
+                activebackground="#546E7A",
+                activeforeground="white",
+                font=("Arial", 10, "bold"),
+                padx=10,
+                pady=5,
+                relief=tk.FLAT,
+            )
+            refresh_pack = {"side": tk.LEFT, "padx": (3, 8)}
+            if before_widget is not None:
+                refresh_pack["before"] = before_widget
+            self.serial_port_refresh_btn.pack(**refresh_pack)
+
+            self._refresh_serial_ports(log_result=False)
+        except Exception as exc:
+            try:
+                self.log_status(f"COM selector setup failed: {exc}", error=True)
+            except Exception:
+                pass
+
+    def _refresh_serial_ports(self, log_result=True):
+        """Refresh detected serial devices and keep/select a valid COM port."""
+        ports = []
+        try:
+            from serial.tools import list_ports
+
+            ports = [port.device for port in list_ports.comports()]
+        except Exception as exc:
+            if log_result:
+                self.log_status(f"Unable to list COM ports: {exc}", error=True)
+
+        ports = sorted(set(ports))
+
+        combo = getattr(self, "serial_port_combo", None)
+        if combo is not None:
+            combo["values"] = ports
+
+        current = self.serial_port_var.get().strip()
+        if current in ports:
+            selected = current
+        elif ports:
+            selected = ports[0]
+        else:
+            selected = ""
+
+        self.serial_port_var.set(selected)
+
+        if log_result:
+            if ports:
+                self.log_status(f"Detected COM ports: {', '.join(ports)}")
+            else:
+                self.log_status("No COM ports detected", error=True)
 
     def send_arduino_command(self, cmd):
         """Keep the existing manual-command rules and include Z jog commands."""
