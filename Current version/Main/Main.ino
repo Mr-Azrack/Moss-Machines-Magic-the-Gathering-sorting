@@ -65,8 +65,9 @@ uint8_t range[6];
 
 byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, Z_ENDSTOP_MAX;
 long zPositionSteps = 0;
-const long Z_SOFT_MAX_STEPS = 92500L;
+const long Z_SOFT_MAX_STEPS = 93500L;
 const short PICKUP_CONTACT_MM = 5;
+const long PICKUP_COMPRESSION_STEPS = 1000L;  // ~1.1 mm extra cup compression at Zcal 935.
 const byte MAX_PICKUP_ATTEMPTS = 3;
 const unsigned short PICKUP_VACUUM_BUILD_MS = 1000;
 const unsigned short RELEASE_PULSE_MS = 250;
@@ -598,6 +599,7 @@ void Tray(short var) {
   long remainingMm = pickupRangeMm - (long)PICKUP_CONTACT_MM;
   if (remainingMm < 0) remainingMm = 0;
   long pickupSteps = remainingMm * (long)Zcal;
+  pickupSteps += PICKUP_COMPRESSION_STEPS;
 
   long remainingSafeSteps = Z_SOFT_MAX_STEPS - zPositionSteps;
   if (remainingSafeSteps < 0) remainingSafeSteps = 0;
