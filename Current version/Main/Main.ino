@@ -69,7 +69,7 @@ const long Z_SOFT_MAX_STEPS = 93500L;
 const short PICKUP_CONTACT_MM = 5;
 const long PICKUP_COMPRESSION_STEPS = 1000L;  // ~1.1 mm extra cup compression at Zcal 935.
 const byte MAX_PICKUP_ATTEMPTS = 3;
-const unsigned short PICKUP_VACUUM_BUILD_MS = 1000;
+const unsigned short PICKUP_VACUUM_PULSE_MS = 750;
 const unsigned short RELEASE_PULSE_MS = 250;
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
@@ -258,8 +258,22 @@ boolean pick(long steps, byte Release) {
     Move1(0, steps, zspeed);
     if (abortRequested) return false;
 
+    // Active pickup mode: pulse Vac1 long enough to establish the seal,
+    // then shut the pump off before lifting.  The vacuum line/cup should
+    // retain enough vacuum to carry the card mechanically.
     digitalWrite(Vacuum1, HIGH);
-    if (!delayWithStop(PICKUP_VACUUM_BUILD_MS)) {
+    if (!delayWithStop(PICKUP_VACUUM_PULSE_MS)) {
+      digitalWrite(Vacuum1, LOW);
+      return false;
+    }
+    digitalWrite(Vacuum1, LOW);
+
+    // Previous continuous-hold pickup mode retained here for easy rollback.
+    // To restore it, replace the pulse block above and the Move1 block below
+    // with this commented section.
+    /*
+    digitalWrite(Vacuum1, HIGH);
+    if (!delayWithStop(1000)) {
       digitalWrite(Vacuum1, LOW);
       return false;
     }
@@ -269,14 +283,16 @@ boolean pick(long steps, byte Release) {
       digitalWrite(Vacuum1, LOW);
       return false;
     }
+    */
+
+    Move1(1, steps, zespeed);
+    if (abortRequested) return false;
 
     ReadRange(3);
     if (((range[2] + range[3]) / 2) <= pickup_threshold) {
-      // Successful pickup: Vac1 intentionally remains ON through X/Y travel.
       return true;
     }
 
-    digitalWrite(Vacuum1, LOW);
     PickupRetry++;
     if (PickupRetry < MAX_PICKUP_ATTEMPTS) {
       if (!delayWithStop(150)) return false;
