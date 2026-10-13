@@ -40,7 +40,7 @@ Adafruit_VL6180X vl = Adafruit_VL6180X();
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 boolean newData = false, readInProgress = false, newDataFromPC = false;
-boolean atHomePosition = true;
+boolean atHomePosition = false;
 boolean machineStarted = false;
 boolean abortRequested = false;
 byte bytesRecvd = 0, PickupRetry;
@@ -104,7 +104,6 @@ void setup() {
   }
   Serial.println("Sensor found!");
   PrintLCD("ToF sensor", "found");
-  Homemachine();
   delay(100);
   Serial.println("<Arduino is ready>");
 }
@@ -443,6 +442,12 @@ void DetermineAction() {
 
   if (Tempval1 == "StartMachine") {
     abortRequested = false;
+    machineStarted = false;
+    Homemachine();
+    if (!atHomePosition) {
+      PrintLCD("START FAILED", "Home failed");
+      return;
+    }
     machineStarted = true;
     Serial.println("<OK,MachineStarted>");
     PrintLCD("Machine STARTED", "Accepting cards");
@@ -681,9 +686,6 @@ void Tray(short var) {
   if (x != 0) { Move4(0, 1, XCourseCorrection, 0); }
   if (abortRequested) return;
 
-  if (upcount % HCC == 0 && upcount >= HCC / 2) {
-    Homemachine();
-  }
   atHomePosition = true;
 }
 
