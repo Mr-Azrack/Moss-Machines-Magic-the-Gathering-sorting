@@ -66,6 +66,7 @@ uint8_t range[6];
 byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, Z_ENDSTOP_MAX;
 long zPositionSteps = 0;
 const long Z_SOFT_MAX_STEPS = 52860L;
+const long Z_MANUAL_CAL_MAX_STEPS = 103000L;  // Manual calibration only; auto sorting remains constrained above.
 const short PICKUP_CONTACT_MM = 5;
 const long PICKUP_COMPRESSION_STEPS = 1870L;  // ~2.0 mm extra cup compression at Zcal 935.
 const byte MAX_PICKUP_ATTEMPTS = 3;
@@ -482,7 +483,7 @@ void DetermineAction() {
   } else if (Tempval1 == "CalibrateX2") {Move4(1,1,(short)manualSteps,0);
   } else if (Tempval1 == "CalibrateY1") {Move4(0,0,0,(short)manualSteps);
   } else if (Tempval1 == "CalibrateY2") {Move4(0,1,0,(short)manualSteps);
-  } else if (Tempval1 == "CalibrateZ1") {Move1(0,manualSteps,zspeed);
+  } else if (Tempval1 == "CalibrateZ1") {Move1CalibrationDown(manualSteps,zspeed);
   } else if (Tempval1 == "CalibrateZ2") {Move1(1,manualSteps,zespeed);
   } else if (Tempval1 == "HomeButton") {Homemachine();
 
@@ -712,6 +713,28 @@ void Move4(boolean dir1, boolean dir3, short steps1, short steps2) {
     digitalWrite(Ystep, LOW);
     digitalWrite(E1step, LOW);
     delayMicroseconds(speed);
+  }
+}
+
+void Move1CalibrationDown(long steps, short speed1) {
+  if (abortRequested) return;
+
+  long availableSteps = Z_MANUAL_CAL_MAX_STEPS - zPositionSteps;
+  if (availableSteps <= 0) {
+    Serial.println("Z manual calibration limit reached");
+    return;
+  }
+  if (steps > availableSteps) steps = availableSteps;
+
+  digitalWrite(Zdir, 0);
+  for (long i = 0; i < steps; i++) {
+    if (abortRequested) break;
+
+    digitalWrite(Zstep, HIGH);
+    delayMicroseconds(speed1);
+    digitalWrite(Zstep, LOW);
+    delayMicroseconds(speed1);
+    zPositionSteps++;
   }
 }
 
