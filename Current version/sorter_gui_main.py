@@ -11,6 +11,8 @@ Adds:
 - A longer serial reply window while a physical sort is in progress.
 - An immediate StopMachine write that can interrupt an active sort transaction.
 - A touchscreen-friendly detected COM-port dropdown with Refresh.
+- Compact UI enabled by default.
+- Status log positioned under the live camera feed.
 """
 
 import queue
@@ -59,6 +61,107 @@ class ScannerGUI(BaseScannerGUI):
         self._sensor_queue = queue.Queue(maxsize=2)
         super().__init__(root)
         self.root.after(50, self._drain_sensor_queue)
+
+    def _setup_gui(self):
+        """Build the existing GUI, default to compact mode, and relocate status."""
+        # The base class creates compact_mode_var before calling _setup_gui().
+        # Set it here so the checkbox is already selected when the GUI appears.
+        try:
+            self.compact_mode_var.set(True)
+        except Exception:
+            pass
+
+        super()._setup_gui()
+        self._move_status_log_under_camera()
+
+        # Apply the base GUI's existing compact-layout behavior after all widgets
+        # have been created and the status log has been relocated.
+        try:
+            self.apply_compact_mode()
+        except Exception:
+            pass
+
+    def _move_status_log_under_camera(self):
+        """Move the existing live status log from the controls to camera panel."""
+        old_text = getattr(self, "status_text", None)
+        camera_canvas = getattr(self, "canvas", None)
+        if old_text is None or camera_canvas is None:
+            return
+
+        old_frame = old_text.master
+        old_parent = old_frame.master
+        existing_text = ""
+
+        try:
+            old_text.configure(state=tk.NORMAL)
+            existing_text = old_text.get("1.0", "end-1c")
+        except Exception:
+            existing_text = ""
+
+        # Remove the old STATUS LOG heading created by the base Scanner tab.
+        try:
+            for child in old_parent.winfo_children():
+                if child is old_frame:
+                    continue
+                try:
+                    if isinstance(child, tk.Label) and child.cget("text") == "STATUS LOG":
+                        child.destroy()
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        try:
+            old_frame.destroy()
+        except Exception:
+            pass
+
+        camera_parent = camera_canvas.master
+
+        self.camera_status_heading = tk.Label(
+            camera_parent,
+            text="STATUS LOG",
+            bg="#1e1e1e",
+            fg="#ffffff",
+            font=self.header_font,
+        )
+        self.camera_status_heading.pack(pady=(8, 3))
+
+        self.camera_status_frame = tk.Frame(
+            camera_parent,
+            bg="#1a1a1a",
+            relief=tk.SUNKEN,
+            bd=1,
+        )
+        self.camera_status_frame.pack(
+            fill=tk.BOTH,
+            expand=True,
+            padx=10,
+            pady=(0, 5),
+        )
+
+        self.status_text = tk.Text(
+            self.camera_status_frame,
+            height=10,
+            bg="#1a1a1a",
+            fg="#00ff00",
+            font=("Consolas", 8),
+            wrap=tk.WORD,
+            state=tk.NORMAL,
+        )
+        status_scroll = tk.Scrollbar(
+            self.camera_status_frame,
+            command=self.status_text.yview,
+        )
+        self.status_text.configure(yscrollcommand=status_scroll.set)
+        self.status_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        status_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        if existing_text:
+            self.status_text.insert(tk.END, existing_text)
+            self.status_text.see(tk.END)
+
+        self.status_text.configure(state=tk.DISABLED)
 
     def _setup_arduino_tab(self, parent):
         """Build the existing Arduino tab, then add sorter-specific controls."""
