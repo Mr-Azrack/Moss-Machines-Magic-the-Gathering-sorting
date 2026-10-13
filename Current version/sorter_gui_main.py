@@ -11,14 +11,19 @@ Adds:
 - A longer serial reply window while a physical sort is in progress.
 - An immediate StopMachine write that can interrupt an active sort transaction.
 - A touchscreen-friendly detected COM-port dropdown with Refresh.
+- A touchscreen Arduino .ino firmware loader using arduino-cli.
 - Compact UI enabled by default.
 - Status log positioned under the live camera feed.
 """
 
+import os
 import queue
+import shutil
+import subprocess
+import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from gui_interface_enhanced import ScannerGUI as BaseScannerGUI
 
@@ -52,6 +57,7 @@ _CONTROL_PREFIXES = (
 )
 
 _SORT_REPLY_TIMEOUT_SECONDS = 120
+_ARDUINO_FQBN = "arduino:avr:mega:cpu=atmega2560"
 
 
 class ScannerGUI(BaseScannerGUI):
@@ -171,6 +177,7 @@ class ScannerGUI(BaseScannerGUI):
         # The same serial_port_var is preserved, so existing connection logic is
         # unchanged and no keyboard is required for normal use.
         self._install_serial_port_selector(parent)
+        self._install_firmware_loader()
 
         # Keep the GUI's initial Z values aligned with the calibrated firmware
         # defaults so an Upload cannot accidentally restore older settings.
@@ -240,7 +247,7 @@ class ScannerGUI(BaseScannerGUI):
             yield from self._walk_widgets(child)
 
     def _install_serial_port_selector(self, parent):
-        """Replace the base GUI's COM text entry with a readonly dropdown."""
+        """Replace the base GUI's COM text entry with a compact readonly dropdown."""
         try:
             target_var = str(self.serial_port_var)
             port_entry = None
@@ -260,6 +267,7 @@ class ScannerGUI(BaseScannerGUI):
                 return
 
             holder = port_entry.master
+            self._arduino_connection_frame = holder.master
             siblings = list(holder.winfo_children())
             try:
                 entry_index = siblings.index(port_entry)
@@ -272,14 +280,16 @@ class ScannerGUI(BaseScannerGUI):
 
             port_entry.destroy()
 
+            # Match the original baud-rate field instead of consuming a large
+            # portion of the Connection row.
             self.serial_port_combo = ttk.Combobox(
                 holder,
                 textvariable=self.serial_port_var,
                 state="readonly",
-                width=12,
-                font=("Arial", 11),
+                width=8,
+                font=("Arial", 9),
             )
-            combo_pack = {"side": tk.LEFT, "padx": 3, "ipady": 3}
+            combo_pack = {"side": tk.LEFT, "padx": 3}
             if before_widget is not None:
                 combo_pack["before"] = before_widget
             self.serial_port_combo.pack(**combo_pack)
@@ -292,9 +302,9 @@ class ScannerGUI(BaseScannerGUI):
                 fg="white",
                 activebackground="#546E7A",
                 activeforeground="white",
-                font=("Arial", 10, "bold"),
-                padx=10,
-                pady=5,
+                font=("Arial", 9, "bold"),
+                padx=8,
+                pady=4,
                 relief=tk.FLAT,
             )
             refresh_pack = {"side": tk.LEFT, "padx": (3, 8)}
@@ -341,6 +351,283 @@ class ScannerGUI(BaseScannerGUI):
                 self.log_status(f"Detected COM ports: {', '.join(ports)}")
             else:
                 self.log_status("No COM ports detected", error=True)
+
+    def _install_firmware_loader(self):
+        """Add a touchscreen firmware picker/uploader below Connection."""
+        conn_frame = getattr(self, "_arduino_connection_frame", None)
+        if conn_frame is None:
+            self.log_status("Firmware loader setup: Connection frame not found", error=True)
+            return
+
+        default_firmware = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "Main",
+            "Main.ino",
+        )
+        if not os.path.isfile(default_firmware):
+            default_firmware = ""
+
+        self.firmware_path_var = tk.StringVar(value=default_firmware)
+
+        firmware_row = tk.Frame(conn_frame, bg="#1a1a1a")
+        firmware_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        tk.Label(
+            firmware_row,
+            text="Firmware:",
+            bg="#1a1a1a",
+            fg="#fff",
+            font=("Arial", 9),
+        ).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.firmware_name_label = tk.Label(
+            firmware_row,
+            text=os.path.basename(default_firmware) if default_firmware else "No .ino selected",
+            bg="#303030",
+            fg="#ffffff",
+            font=("Arial", 9),
+            width=16,
+            anchor="w",
+            padx=5,
+            pady=4,
+        )
+        self.firmware_name_label.pack(side=tk.LEFT, padx=3)
+
+        self.firmware_browse_btn = tk.Button(
+            firmware_row,
+            text="Browse",
+            command=self._browse_firmware,
+            bg="#455A64",
+            fg="white",
+            activebackground="#546E7A",
+            activeforeground="white",
+            font=("Arial", 9, "bold"),
+            padx=10,
+            pady=4,
+            relief=tk.FLAT,
+        )
+        self.firmware_browse_btn.pack(side=tk.LEFT, padx=4)
+
+        self.firmware_upload_btn = tk.Button(
+            firmware_row,
+            text="Upload Firmware",
+            command=self._upload_firmware,
+            bg="#1976D2",
+            fg="white",
+            activebackground="#1E88E5",
+            activeforeground="white",
+            font=("Arial", 9, "bold"),
+            padx=12,
+            pady=4,
+            relief=tk.FLAT,
+        )
+        self.firmware_upload_btn.pack(side=tk.LEFT, padx=4)
+
+    def _browse_firmware(self):
+        """Choose an Arduino sketch without requiring keyboard input."""
+        current = self.firmware_path_var.get().strip()
+        initial_dir = os.path.dirname(current) if current else os.path.dirname(os.path.abspath(__file__))
+        path = filedialog.askopenfilename(
+            title="Select Arduino Firmware",
+            initialdir=initial_dir,
+            filetypes=[("Arduino sketch", "*.ino"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        self.firmware_path_var.set(path)
+        self.firmware_name_label.configure(text=os.path.basename(path))
+        self.log_status(f"Firmware selected: {path}")
+
+    def _find_arduino_cli(self):
+        """Find arduino-cli from PATH or common Arduino IDE 2 locations."""
+        for executable in ("arduino-cli", "arduino-cli.exe"):
+            found = shutil.which(executable)
+            if found:
+                return found
+
+        candidates = []
+        program_files = os.environ.get("ProgramFiles")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
+        local_app_data = os.environ.get("LOCALAPPDATA")
+
+        for root in (program_files, program_files_x86):
+            if root:
+                candidates.append(
+                    os.path.join(
+                        root,
+                        "Arduino IDE",
+                        "resources",
+                        "app",
+                        "lib",
+                        "backend",
+                        "resources",
+                        "arduino-cli.exe",
+                    )
+                )
+
+        if local_app_data:
+            candidates.append(
+                os.path.join(
+                    local_app_data,
+                    "Programs",
+                    "Arduino IDE",
+                    "resources",
+                    "app",
+                    "lib",
+                    "backend",
+                    "resources",
+                    "arduino-cli.exe",
+                )
+            )
+
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+
+        return None
+
+    def _release_serial_for_firmware_upload(self):
+        """Release the selected COM port so arduino-cli can own it."""
+        self.arduino_monitoring = False
+        try:
+            if hasattr(self, "monitor_var"):
+                self.monitor_var.set(False)
+        except Exception:
+            pass
+
+        serial_obj = None
+        try:
+            if self.scanner:
+                serial_obj = getattr(self.scanner, "ser", None)
+        except Exception:
+            serial_obj = None
+
+        if serial_obj is not None:
+            try:
+                serial_obj.close()
+            except Exception:
+                pass
+            try:
+                self.scanner.ser = None
+            except Exception:
+                pass
+
+        self.machine_started = False
+        try:
+            self.machine_state_label.configure(text="● STOPPED", fg="#ff4444")
+            self.start_machine_btn.configure(state=tk.DISABLED)
+            self.stop_machine_btn.configure(state=tk.DISABLED)
+            self.connect_btn.configure(text="Connect", state=tk.NORMAL, bg="#FF9800")
+            self._update_controls_state()
+        except Exception:
+            pass
+
+    def _upload_firmware(self):
+        """Compile and upload the selected .ino to the selected Mega COM port."""
+        if self.machine_started:
+            messagebox.showwarning(
+                "Firmware Upload",
+                "Stop the machine before uploading firmware.",
+            )
+            return
+
+        firmware_path = self.firmware_path_var.get().strip()
+        port = self.serial_port_var.get().strip()
+
+        if not firmware_path or not os.path.isfile(firmware_path):
+            messagebox.showwarning("Firmware Upload", "Select a valid .ino file first.")
+            return
+        if not firmware_path.lower().endswith(".ino"):
+            messagebox.showwarning("Firmware Upload", "The selected file must be an .ino sketch.")
+            return
+        if not port:
+            messagebox.showwarning("Firmware Upload", "Select the Arduino COM port first.")
+            return
+
+        sketch_dir = os.path.dirname(firmware_path)
+        sketch_name = os.path.splitext(os.path.basename(firmware_path))[0]
+        if os.path.basename(sketch_dir).lower() != sketch_name.lower():
+            messagebox.showerror(
+                "Firmware Upload",
+                "Arduino requires the sketch folder to match the .ino filename.\n\n"
+                f"Expected folder: {sketch_name}\n"
+                "Select the .ino from its normal Arduino sketch folder.",
+            )
+            return
+
+        cli = self._find_arduino_cli()
+        if not cli:
+            messagebox.showerror(
+                "Firmware Upload",
+                "arduino-cli was not found.\n\n"
+                "Install Arduino CLI or Arduino IDE 2.x on this machine, then try again.",
+            )
+            return
+
+        self._release_serial_for_firmware_upload()
+        self.firmware_upload_btn.configure(text="Uploading…", state=tk.DISABLED)
+        self.firmware_browse_btn.configure(state=tk.DISABLED)
+        self.log_status(f"Compiling {os.path.basename(firmware_path)} for Arduino Mega...")
+
+        def worker():
+            try:
+                compile_result = subprocess.run(
+                    [cli, "compile", "--fqbn", _ARDUINO_FQBN, sketch_dir],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if compile_result.returncode != 0:
+                    details = (compile_result.stderr or compile_result.stdout or "Compile failed").strip()
+                    raise RuntimeError(f"Compile failed:\n{details[-1800:]}")
+
+                self.root.after(0, lambda: self.log_status("✓ Firmware compile successful"))
+
+                upload_result = subprocess.run(
+                    [
+                        cli,
+                        "upload",
+                        "-p",
+                        port,
+                        "--fqbn",
+                        _ARDUINO_FQBN,
+                        sketch_dir,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if upload_result.returncode != 0:
+                    details = (upload_result.stderr or upload_result.stdout or "Upload failed").strip()
+                    raise RuntimeError(f"Upload failed:\n{details[-1800:]}")
+
+                self.root.after(0, self._firmware_upload_success)
+            except Exception as exc:
+                self.root.after(0, lambda err=str(exc): self._firmware_upload_failed(err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _firmware_upload_success(self):
+        """Restore firmware-loader controls after a successful upload."""
+        self.firmware_upload_btn.configure(text="Upload Firmware", state=tk.NORMAL)
+        self.firmware_browse_btn.configure(state=tk.NORMAL)
+        self.log_status("✓ Firmware uploaded successfully")
+        self.root.after(1200, lambda: self._refresh_serial_ports(log_result=False))
+        messagebox.showinfo(
+            "Firmware Upload",
+            "Firmware uploaded successfully.\n\n"
+            "Allow the Arduino to reboot/home, then tap Connect.",
+        )
+
+    def _firmware_upload_failed(self, error_text):
+        """Restore firmware-loader controls and report a failed upload."""
+        self.firmware_upload_btn.configure(text="Upload Firmware", state=tk.NORMAL)
+        self.firmware_browse_btn.configure(state=tk.NORMAL)
+        self.log_status(error_text, error=True)
+        messagebox.showerror("Firmware Upload", error_text)
 
     def send_arduino_command(self, cmd):
         """Keep the existing manual-command rules and include Z jog commands."""
@@ -401,10 +688,10 @@ class ScannerGUI(BaseScannerGUI):
 
         wire_cmd = text if is_control else f"Sort,{text}"
 
-        # A calibrated sort now contains roughly 92k Z steps down and back up,
-        # plus X/Y travel and card release.  Keep the scan transaction locked
-        # until the Arduino reports completion so the same card cannot be
-        # rescanned and the live monitor cannot consume the sort reply.
+        # A calibrated sort contains long Z travel plus X/Y travel and card
+        # release. Keep the scan transaction locked until the Arduino reports
+        # completion so the same card cannot be rescanned and the live monitor
+        # cannot consume the sort reply.
         serial_obj = None
         old_timeout = None
         if wire_cmd.startswith("Sort,"):
