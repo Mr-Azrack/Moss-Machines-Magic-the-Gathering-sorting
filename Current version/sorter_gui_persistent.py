@@ -18,7 +18,7 @@ import numpy as np
 from sorter_gui_main import ScannerGUI as BaseSorterGUI
 
 
-_SETTINGS_VERSION = 4
+_SETTINGS_VERSION = 5
 _AUTOSAVE_MS = 500
 
 # Current tuned motion defaults. Lower pulse-delay values mean faster motion.
@@ -27,6 +27,27 @@ _MOTION_DEFAULTS = {
     "zspeed": "28",
     "zespeed": "36",
 }
+
+# Search broadly enough to find the best pHash candidate first. The operator's
+# Min Confidence setting is the final acceptance gate and remains independent
+# from this internal candidate-search distance.
+_PHASH_SEARCH_DISTANCE = 120
+
+# Touchscreen parameter layout. Arrow step sizes are intentionally small enough
+# for tuning while avoiding dozens of taps for the larger timing values.
+_PARAM_TOUCH_CONTROLS = [
+    ("Speed", "speed", 25, 25, 2000),
+    ("Z Spd", "zspeed", 2, 2, 500),
+    ("Z E Spd", "zespeed", 2, 2, 500),
+    ("X Cal", "xcal", 1, 1, 5000),
+    ("Y Cal", "ycal", 1, 1, 5000),
+    ("Z Cal", "zcal", 1, 1, 5000),
+    ("Pick", "pickup_thresh", 1, 0, 255),
+    ("Release", "release_thresh", 1, 0, 255),
+    ("Home", "hcc", 1, 0, 1000),
+    ("Y Cor", "ycc", 1, -100, 100),
+    ("X Cor", "xcc", 1, -100, 100),
+]
 
 # These are live/operational states, not configuration. Restoring them after a
 # power interruption could make the interface claim hardware is active when it
@@ -90,8 +111,10 @@ class ScannerGUI(BaseSorterGUI):
         self._apply_current_motion_defaults()
 
         self._install_card_presence_filter()
+        self._install_recognition_tuning()
         self._install_confidence_gate()
         self._configure_confidence_control()
+        self._install_parameter_touch_controls()
         self._apply_touch_sizing()
         self._restore_session_settings()
         self._session_settings_loading = False
@@ -111,6 +134,7 @@ class ScannerGUI(BaseSorterGUI):
         try:
             self._apply_touch_sizing()
             self._configure_confidence_control()
+            self._refresh_parameter_touch_sizing()
         except Exception:
             pass
         return result
@@ -160,16 +184,26 @@ class ScannerGUI(BaseSorterGUI):
             pass
 
     def _apply_touch_sizing(self):
-        """Double tab height and make Scanner-tab buttons/dropdowns touch friendly."""
+        """Apply the requested large touch targets without changing functionality."""
         style = ttk.Style(self.root)
 
-        # Top notebook tabs: roughly twice the previous vertical height while
-        # preserving the existing labels and horizontal footprint as much as possible.
+        # Top notebook tabs: roughly twice the previous vertical height.
         style.configure("TNotebook.Tab", padding=(8, 10))
 
         # Scanner-tab-only ttk styles so Arduino/Export/etc. controls are not enlarged.
         style.configure("Scanner.TCombobox", padding=(6, 8), font=("Segoe UI", 11))
         style.configure("Scanner.TButton", padding=(8, 8), font=("Segoe UI", 10, "bold"))
+
+        # Camera Start/Stop live beside the scanner rather than inside the tab,
+        # so size them explicitly. Compact mode is allowed to change the rest of
+        # the layout, but these two primary controls stay large and easy to hit.
+        for button in (getattr(self, "start_btn", None), getattr(self, "stop_btn", None)):
+            if button is None:
+                continue
+            try:
+                button.configure(font=("Segoe UI", 12, "bold"), height=2, pady=18)
+            except Exception:
+                pass
 
         scanner_tab = self._scanner_tab_widget()
         if scanner_tab is None:
@@ -205,7 +239,10 @@ class ScannerGUI(BaseSorterGUI):
 
         for widget in self._walk_descendants(scanner_tab):
             try:
-                if isinstance(widget, tk.Label) and widget.cget("text") == "Match Threshold:":
+                if isinstance(widget, tk.Label) and widget.cget("text") in (
+                    "Match Threshold:",
+                    "Min Confidence (%):",
+                ):
                     widget.configure(text="Min Confidence (%):")
                 elif isinstance(widget, tk.Spinbox):
                     if str(widget.cget("textvariable")) == threshold_var_name:
@@ -213,16 +250,287 @@ class ScannerGUI(BaseSorterGUI):
             except Exception:
                 continue
 
+    def _find_parameter_frame(self):
+        """Find the existing base parameter grid by one of its Tk variables."""
+        try:
+            variable_names = {str(var) for var in self.param_vars.values()}
+        except Exception:
+            return None
+
+        try:
+            for widget in self._walk_descendants(self.notebook):
+                if not isinstance(widget, tk.Entry):
+                    continue
+                try:
+                    if str(widget.cget("textvariable")) in variable_names:
+                        return widget.master
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _install_parameter_touch_controls(self):
+        """Replace keyboard-oriented parameter entries with large arrow controls."""
+        params_frame = self._find_parameter_frame()
+        if params_frame is None:
+            return
+
+        self._touch_param_frame = params_frame
+
+        # This frame contains only the base parameter labels and entries. The
+        # existing Upload/Fetch buttons are a sibling and remain fully functional.
+        for child in list(params_frame.winfo_children()):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+        try:
+            params_frame.configure(bg="#1a1a1a")
+        except Exception:
+            pass
+
+        for col in range(4):
+            try:
+                params_frame.grid_columnconfigure(col, weight=1, uniform="param")
+            except Exception:
+                pass
+
+        self._touch_param_entries = {}
+        self._touch_param_buttons = []
+
+        for index, (label, key, step, minimum, maximum) in enumerate(_PARAM_TOUCH_CONTROLS):
+            row = index // 4
+            col = index % 4
+
+            group = tk.Frame(
+                params_frame,
+                bg="#242424",
+                relief=tk.GROOVE,
+                bd=1,
+                padx=4,
+                pady=4,
+            )
+            group.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+
+            tk.Label(
+                group,
+                text=label,
+                bg="#242424",
+                fg="#dddddd",
+                font=("Segoe UI", 10, "bold"),
+            ).pack(pady=(0, 3))
+
+            control_row = tk.Frame(group, bg="#242424")
+            control_row.pack(fill=tk.X)
+
+            down_button = tk.Button(
+                control_row,
+                text="▼",
+                command=lambda k=key, s=step, lo=minimum, hi=maximum: self._adjust_parameter(
+                    k, -s, lo, hi
+                ),
+                bg="#455A64",
+                fg="white",
+                activebackground="#546E7A",
+                activeforeground="white",
+                font=("Segoe UI Symbol", 12, "bold"),
+                width=3,
+                pady=9,
+                relief=tk.FLAT,
+                takefocus=False,
+            )
+            down_button.pack(side=tk.LEFT, padx=(0, 3))
+
+            entry = tk.Entry(
+                control_row,
+                textvariable=self.param_vars[key],
+                width=6,
+                justify=tk.CENTER,
+                bg="#404040",
+                fg="#ffffff",
+                insertbackground="#ffffff",
+                font=("Segoe UI", 13, "bold"),
+                relief=tk.FLAT,
+            )
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=11)
+
+            up_button = tk.Button(
+                control_row,
+                text="▲",
+                command=lambda k=key, s=step, lo=minimum, hi=maximum: self._adjust_parameter(
+                    k, s, lo, hi
+                ),
+                bg="#455A64",
+                fg="white",
+                activebackground="#546E7A",
+                activeforeground="white",
+                font=("Segoe UI Symbol", 12, "bold"),
+                width=3,
+                pady=9,
+                relief=tk.FLAT,
+                takefocus=False,
+            )
+            up_button.pack(side=tk.LEFT, padx=(3, 0))
+
+            self._touch_param_entries[key] = entry
+            self._touch_param_buttons.extend((down_button, up_button))
+
+        self._refresh_parameter_touch_sizing()
+
+    def _adjust_parameter(self, key, delta, minimum, maximum):
+        """Increment/decrement one saved parameter without requiring a keyboard."""
+        variable = self.param_vars.get(key)
+        if variable is None:
+            return
+
+        try:
+            current = int(float(variable.get()))
+        except Exception:
+            current = 0
+
+        value = max(int(minimum), min(int(maximum), current + int(delta)))
+        variable.set(str(value))
+
+    def _refresh_parameter_touch_sizing(self):
+        """Keep parameter arrows/value fields large after compact-mode changes."""
+        for entry in getattr(self, "_touch_param_entries", {}).values():
+            try:
+                entry.configure(font=("Segoe UI", 13, "bold"))
+                info = entry.pack_info()
+                entry.pack_configure(ipady=max(11, int(info.get("ipady", 0) or 0)))
+            except Exception:
+                pass
+
+        for button in getattr(self, "_touch_param_buttons", []):
+            try:
+                button.configure(font=("Segoe UI Symbol", 12, "bold"), pady=9)
+            except Exception:
+                pass
+
+        # The existing Upload/Fetch buttons are still how changes are sent to
+        # the Arduino. Enlarge them as well so the entire parameter workflow is
+        # touchscreen-friendly.
+        frame = getattr(self, "_touch_param_frame", None)
+        if frame is not None:
+            try:
+                parent = frame.master
+                for widget in parent.winfo_children():
+                    if isinstance(widget, tk.Frame) and widget is not frame:
+                        for child in widget.winfo_children():
+                            if isinstance(child, tk.Button):
+                                text = str(child.cget("text"))
+                                if "Upload" in text or "Fetch" in text:
+                                    child.configure(font=("Segoe UI", 10, "bold"), pady=8)
+            except Exception:
+                pass
+
     def _minimum_confidence(self):
         try:
             return max(1.0, min(100.0, float(self.match_threshold_var.get())))
         except Exception:
             return 90.0
 
-    def _confidence_to_phash_distance(self, confidence):
-        """Convert displayed confidence percent to the scanner's 0-256 pHash distance."""
-        confidence = max(0.0, min(100.0, float(confidence)))
-        return max(0, min(256, int(256.0 * (1.0 - confidence / 100.0))))
+    @staticmethod
+    def _camera_calibrated_phash_confidence(distance):
+        """Map 256-bit pHash distance to a confidence suited to live camera captures.
+
+        The old linear conversion treated moderate crop/lighting differences as
+        much less certain than they actually are. A quadratic distance penalty
+        keeps close matches high while still dropping rapidly as distance grows.
+        """
+        try:
+            distance = max(0.0, min(256.0, float(distance)))
+        except Exception:
+            distance = 256.0
+        ratio = distance / 256.0
+        return max(0.0, min(100.0, 100.0 * (1.0 - ratio * ratio)))
+
+    def _recalibrate_match_confidences(self, matches):
+        """Use pHash identity distance + runner-up separation for final confidence.
+
+        MSER remains attached as image-quality telemetry but no longer pulls the
+        identity confidence downward because it is not candidate-specific.
+        """
+        if not matches:
+            return matches
+
+        tuned = []
+        for match in matches:
+            if isinstance(match, dict):
+                tuned.append(match)
+            else:
+                tuned.append(match)
+
+        for index, match in enumerate(tuned):
+            if not isinstance(match, dict):
+                continue
+
+            try:
+                distance = float(match.get("distance", 256) or 256)
+            except Exception:
+                distance = 256.0
+
+            legacy_confidence = match.get("confidence")
+            raw_phash_confidence = match.get("phash_confidence")
+            if raw_phash_confidence is None:
+                raw_phash_confidence = max(0.0, 100.0 - (distance / 256.0 * 100.0))
+
+            confidence = self._camera_calibrated_phash_confidence(distance)
+            separation_bonus = 0.0
+
+            # Only the top candidate gets a uniqueness bonus. A large distance
+            # gap to the runner-up is meaningful evidence that the best match is
+            # genuinely distinct, while a near tie should remain conservative.
+            if index == 0 and len(tuned) > 1 and isinstance(tuned[1], dict):
+                try:
+                    second_distance = float(tuned[1].get("distance", distance) or distance)
+                    margin = max(0.0, second_distance - distance)
+                    separation_bonus = min(5.0, margin / 8.0)
+                except Exception:
+                    separation_bonus = 0.0
+
+            match["legacy_confidence"] = legacy_confidence
+            match["phash_confidence"] = float(raw_phash_confidence)
+            match["confidence_margin_bonus"] = separation_bonus
+            match["confidence"] = min(100.0, confidence + separation_bonus)
+
+        return tuned
+
+    def _install_recognition_tuning(self):
+        """Broaden candidate search, then recalibrate confidence conservatively."""
+        scanner = getattr(self, "scanner", None)
+        if scanner is None:
+            return
+
+        original_scan = getattr(scanner, "scan_card", None)
+        if not callable(original_scan):
+            return
+
+        def tuned_scan(image, *args, **kwargs):
+            positional = list(args)
+
+            # scan_card(image, threshold=None, ...): decouple the internal
+            # candidate-search distance from the user's final confidence gate.
+            if positional:
+                try:
+                    current_threshold = float(positional[0] or 0)
+                except Exception:
+                    current_threshold = 0.0
+                positional[0] = max(current_threshold, _PHASH_SEARCH_DISTANCE)
+            else:
+                try:
+                    current_threshold = float(kwargs.get("threshold") or 0)
+                except Exception:
+                    current_threshold = 0.0
+                kwargs["threshold"] = max(current_threshold, _PHASH_SEARCH_DISTANCE)
+
+            matches, elapsed = original_scan(image, *positional, **kwargs)
+            return self._recalibrate_match_confidences(matches), elapsed
+
+        scanner.scan_card = tuned_scan
+        scanner.scan_threshold = _PHASH_SEARCH_DISTANCE
 
     def _passes_minimum_confidence(self, card_info):
         if not card_info:
@@ -240,12 +548,9 @@ class ScannerGUI(BaseSorterGUI):
             original_process = getattr(scanner, "_process_card_from_contour", None)
             if callable(original_process):
                 def gated_process(frame, card_approx):
-                    # The scanner's threshold is a Hamming-distance ceiling, not
-                    # a percentage. Convert the user's percentage before every
-                    # scan so 90 really means approximately 90% or better.
-                    scanner.scan_threshold = self._confidence_to_phash_distance(
-                        self._minimum_confidence()
-                    )
+                    # The pHash search itself stays broad enough to identify the
+                    # best candidate; Min Confidence controls acceptance only.
+                    scanner.scan_threshold = _PHASH_SEARCH_DISTANCE
                     card_info = original_process(frame, card_approx)
                     if not self._passes_minimum_confidence(card_info):
                         return None
@@ -577,6 +882,9 @@ class ScannerGUI(BaseSorterGUI):
             except Exception:
                 pass
 
+            # The saved confidence value is intentionally preserved exactly as
+            # the operator left it. After this recognition recalibration, the
+            # operator can raise it again without us silently changing settings.
             try:
                 self.log_status("✓ Previous session settings restored")
             except Exception:
