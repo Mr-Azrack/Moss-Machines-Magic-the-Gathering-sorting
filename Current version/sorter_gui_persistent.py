@@ -18,7 +18,7 @@ import numpy as np
 from sorter_gui_main import ScannerGUI as BaseSorterGUI
 
 
-_SETTINGS_VERSION = 6
+_SETTINGS_VERSION = 7
 _AUTOSAVE_MS = 500
 _CAMERA_WIDTH_SCALE = 0.75
 
@@ -185,7 +185,7 @@ class ScannerGUI(BaseSorterGUI):
             pass
 
     def _apply_camera_width_reduction(self):
-        """Give the control panel more width while preserving camera height."""
+        """Shrink the complete camera/status column and give that width to tabs."""
         try:
             compact = bool(self.compact_mode_var.get())
         except Exception:
@@ -200,6 +200,42 @@ class ScannerGUI(BaseSorterGUI):
         except Exception:
             pass
 
+        # The camera canvas lives inside the full left column. The base layout
+        # allowed that column to expand, and the Text status widget also requested
+        # a wide default size. Restrict both so the right notebook can actually
+        # consume the horizontal space freed by the narrower camera.
+        try:
+            left_panel = self.canvas.master
+            left_panel.pack_configure(fill=tk.Y, expand=False)
+        except Exception:
+            left_panel = None
+
+        try:
+            if getattr(self, "status_text", None) is not None:
+                self.status_text.configure(width=max(32, int(self.canvas_width / 8)))
+        except Exception:
+            pass
+
+        try:
+            right_panel = self.notebook.master
+            right_panel.pack_configure(fill=tk.BOTH, expand=True)
+        except Exception:
+            pass
+
+    def _apply_manual_movement_sizing(self):
+        """Make X/Y/Z manual jog buttons comfortable touchscreen targets."""
+        for button in getattr(self, "movement_buttons", []):
+            try:
+                button.configure(
+                    font=("Segoe UI", 11, "bold"),
+                    width=5,
+                    height=2,
+                    padx=8,
+                    pady=7,
+                )
+            except Exception:
+                pass
+
     def _apply_touch_sizing(self):
         """Apply the requested large touch targets without changing functionality."""
         style = ttk.Style(self.root)
@@ -211,8 +247,8 @@ class ScannerGUI(BaseSorterGUI):
         style.configure("Scanner.TCombobox", padding=(4, 8), font=("Segoe UI", 10))
         style.configure("Scanner.TButton", padding=(5, 8), font=("Segoe UI", 10, "bold"))
 
-        # Shrink only the camera width to free room for the right-side controls.
         self._apply_camera_width_reduction()
+        self._apply_manual_movement_sizing()
 
         # Camera Start/Stop live beside the scanner rather than inside the tab,
         # so size them explicitly. Compact mode is allowed to change the rest of
@@ -366,7 +402,7 @@ class ScannerGUI(BaseSorterGUI):
             entry = tk.Entry(
                 control_row,
                 textvariable=self.param_vars[key],
-                width=5,
+                width=4,
                 justify=tk.CENTER,
                 bg="#404040",
                 fg="#ffffff",
@@ -414,10 +450,10 @@ class ScannerGUI(BaseSorterGUI):
         variable.set(str(value))
 
     def _refresh_parameter_touch_sizing(self):
-        """Keep parameter arrows/value fields tall but horizontally compact."""
+        """Keep parameter arrows tall while reducing the value-field width."""
         for entry in getattr(self, "_touch_param_entries", {}).values():
             try:
-                entry.configure(font=("Segoe UI", 12, "bold"), width=5)
+                entry.configure(font=("Segoe UI", 12, "bold"), width=4)
                 info = entry.pack_info()
                 entry.pack_configure(ipady=max(11, int(info.get("ipady", 0) or 0)))
             except Exception:
