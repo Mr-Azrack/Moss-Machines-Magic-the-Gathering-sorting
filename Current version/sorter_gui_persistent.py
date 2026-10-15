@@ -10,6 +10,7 @@ Operational machine state is deliberately NOT restored after a restart.
 import json
 import os
 import tkinter as tk
+from tkinter import ttk
 
 import cv2
 import numpy as np
@@ -17,8 +18,15 @@ import numpy as np
 from sorter_gui_main import ScannerGUI as BaseSorterGUI
 
 
-_SETTINGS_VERSION = 3
+_SETTINGS_VERSION = 4
 _AUTOSAVE_MS = 500
+
+# Current tuned motion defaults. Lower pulse-delay values mean faster motion.
+_MOTION_DEFAULTS = {
+    "speed": "500",
+    "zspeed": "28",
+    "zespeed": "36",
+}
 
 # These are live/operational states, not configuration. Restoring them after a
 # power interruption could make the interface claim hardware is active when it
@@ -76,7 +84,15 @@ class ScannerGUI(BaseSorterGUI):
 
         super().__init__(root)
 
+        # The base sorter keeps its own defaults for backwards compatibility.
+        # The persistent launcher is the normal application entry point, so set
+        # the current tuned defaults here before any saved session is restored.
+        self._apply_current_motion_defaults()
+
         self._install_card_presence_filter()
+        self._install_confidence_gate()
+        self._configure_confidence_control()
+        self._apply_touch_sizing()
         self._restore_session_settings()
         self._session_settings_loading = False
 
@@ -88,6 +104,168 @@ class ScannerGUI(BaseSorterGUI):
             self._last_saved_settings_text = None
 
         self.root.after(_AUTOSAVE_MS, self._autosave_session_settings)
+
+    def apply_compact_mode(self):
+        """Preserve compact layout while keeping requested controls touch-sized."""
+        result = super().apply_compact_mode()
+        try:
+            self._apply_touch_sizing()
+            self._configure_confidence_control()
+        except Exception:
+            pass
+        return result
+
+    def _apply_current_motion_defaults(self):
+        """Align the normal GUI defaults with the current firmware tuning."""
+        try:
+            for key, value in _MOTION_DEFAULTS.items():
+                variable = self.param_vars.get(key)
+                if variable is not None:
+                    variable.set(value)
+        except Exception:
+            pass
+
+    def _scanner_tab_widget(self):
+        """Return the Scanner tab frame without depending on base private names."""
+        try:
+            tabs = self.notebook.tabs()
+            if not tabs:
+                return None
+            return self.notebook.nametowidget(tabs[0])
+        except Exception:
+            return None
+
+    @staticmethod
+    def _walk_descendants(parent):
+        if parent is None:
+            return
+        for child in parent.winfo_children():
+            yield child
+            yield from ScannerGUI._walk_descendants(child)
+
+    @staticmethod
+    def _add_vertical_ipad(widget, amount):
+        """Increase a widget's allocated height without altering its width."""
+        try:
+            manager = widget.winfo_manager()
+            if manager == "pack":
+                info = widget.pack_info()
+                current = int(info.get("ipady", 0) or 0)
+                widget.pack_configure(ipady=max(current, amount))
+            elif manager == "grid":
+                info = widget.grid_info()
+                current = int(info.get("ipady", 0) or 0)
+                widget.grid_configure(ipady=max(current, amount))
+        except Exception:
+            pass
+
+    def _apply_touch_sizing(self):
+        """Double tab height and make Scanner-tab buttons/dropdowns touch friendly."""
+        style = ttk.Style(self.root)
+
+        # Top notebook tabs: roughly twice the previous vertical height while
+        # preserving the existing labels and horizontal footprint as much as possible.
+        style.configure("TNotebook.Tab", padding=(8, 10))
+
+        # Scanner-tab-only ttk styles so Arduino/Export/etc. controls are not enlarged.
+        style.configure("Scanner.TCombobox", padding=(6, 8), font=("Segoe UI", 11))
+        style.configure("Scanner.TButton", padding=(8, 8), font=("Segoe UI", 10, "bold"))
+
+        scanner_tab = self._scanner_tab_widget()
+        if scanner_tab is None:
+            return
+
+        for widget in self._walk_descendants(scanner_tab):
+            try:
+                if isinstance(widget, tk.Button):
+                    current = int(float(widget.cget("pady") or 0))
+                    widget.configure(pady=max(8, current * 2))
+                elif isinstance(widget, ttk.Button):
+                    widget.configure(style="Scanner.TButton")
+                elif isinstance(widget, ttk.Combobox):
+                    widget.configure(style="Scanner.TCombobox")
+                elif isinstance(widget, tk.Menubutton):
+                    current = int(float(widget.cget("pady") or 0))
+                    widget.configure(pady=max(8, current * 2))
+                elif isinstance(widget, (tk.Spinbox, tk.Entry)):
+                    self._add_vertical_ipad(widget, 5)
+            except Exception:
+                continue
+
+    def _configure_confidence_control(self):
+        """Make the existing threshold control explicitly represent 1-100% confidence."""
+        scanner_tab = self._scanner_tab_widget()
+        if scanner_tab is None:
+            return
+
+        try:
+            threshold_var_name = str(self.match_threshold_var)
+        except Exception:
+            threshold_var_name = ""
+
+        for widget in self._walk_descendants(scanner_tab):
+            try:
+                if isinstance(widget, tk.Label) and widget.cget("text") == "Match Threshold:":
+                    widget.configure(text="Min Confidence (%):")
+                elif isinstance(widget, tk.Spinbox):
+                    if str(widget.cget("textvariable")) == threshold_var_name:
+                        widget.configure(from_=1, to=100)
+            except Exception:
+                continue
+
+    def _minimum_confidence(self):
+        try:
+            return max(1.0, min(100.0, float(self.match_threshold_var.get())))
+        except Exception:
+            return 90.0
+
+    def _confidence_to_phash_distance(self, confidence):
+        """Convert displayed confidence percent to the scanner's 0-256 pHash distance."""
+        confidence = max(0.0, min(100.0, float(confidence)))
+        return max(0, min(256, int(256.0 * (1.0 - confidence / 100.0))))
+
+    def _passes_minimum_confidence(self, card_info):
+        if not card_info:
+            return False
+        try:
+            confidence = float(card_info.get("confidence", 0) or 0)
+        except Exception:
+            confidence = 0.0
+        return confidence >= self._minimum_confidence()
+
+    def _install_confidence_gate(self):
+        """Reject recognition results below the GUI's actual minimum confidence."""
+        scanner = getattr(self, "scanner", None)
+        if scanner is not None:
+            original_process = getattr(scanner, "_process_card_from_contour", None)
+            if callable(original_process):
+                def gated_process(frame, card_approx):
+                    # The scanner's threshold is a Hamming-distance ceiling, not
+                    # a percentage. Convert the user's percentage before every
+                    # scan so 90 really means approximately 90% or better.
+                    scanner.scan_threshold = self._confidence_to_phash_distance(
+                        self._minimum_confidence()
+                    )
+                    card_info = original_process(frame, card_approx)
+                    if not self._passes_minimum_confidence(card_info):
+                        return None
+                    return card_info
+
+                scanner._process_card_from_contour = gated_process
+
+        # If an optional recognition plugin is installed, apply the same final
+        # confidence gate there so it cannot bypass the GUI setting.
+        plugin = getattr(self, "recognition_plugin", None)
+        if plugin is not None:
+            original_recognize = getattr(plugin, "recognize", None)
+            if callable(original_recognize):
+                def gated_recognize(*args, **kwargs):
+                    card_info = original_recognize(*args, **kwargs)
+                    if not self._passes_minimum_confidence(card_info):
+                        return None
+                    return card_info
+
+                plugin.recognize = gated_recognize
 
     def _install_card_presence_filter(self):
         """Reject blank tray-floor rectangles before recognition starts."""
@@ -297,6 +475,16 @@ class ScannerGUI(BaseSorterGUI):
                         "zespeed": ("52", "50"),
                     }
                     for key, (old_value, new_value) in second_motion_migration.items():
+                        if str(params.get(key, "")) == old_value:
+                            params[key] = new_value
+
+                if saved_version < 4:
+                    third_motion_migration = {
+                        "speed": ("600", "500"),
+                        "zspeed": ("36", "28"),
+                        "zespeed": ("50", "36"),
+                    }
+                    for key, (old_value, new_value) in third_motion_migration.items():
                         if str(params.get(key, "")) == old_value:
                             params[key] = new_value
 
