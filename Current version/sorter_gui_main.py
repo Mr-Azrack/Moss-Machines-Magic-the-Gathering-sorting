@@ -182,10 +182,10 @@ class ScannerGUI(BaseScannerGUI):
         # Keep the GUI's initial motion/calibration values aligned with the
         # tuned firmware defaults so an Upload cannot restore older speeds.
         try:
-            self.param_vars["speed"].set("650")
+            self.param_vars["speed"].set("600")
             self.param_vars["zcal"].set("935")
-            self.param_vars["zspeed"].set("38")
-            self.param_vars["zespeed"].set("52")
+            self.param_vars["zspeed"].set("36")
+            self.param_vars["zespeed"].set("50")
         except Exception:
             pass
 
