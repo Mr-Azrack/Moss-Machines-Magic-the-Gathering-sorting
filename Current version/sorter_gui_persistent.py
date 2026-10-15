@@ -11,6 +11,9 @@ import json
 import os
 import tkinter as tk
 
+import cv2
+import numpy as np
+
 from sorter_gui_main import ScannerGUI as BaseSorterGUI
 
 
@@ -49,6 +52,12 @@ _SORT_LABELS = {
     "finish": "Finish (Foil)",
 }
 
+# The physical pickup tray is itself a large four-sided shape, so the original
+# contour detector can mistake the blank tray floor for a card. Require a small
+# amount of printed detail inside the contour before treating it as a card.
+_CARD_INTERIOR_MIN_EDGE_DENSITY = 0.008
+_CARD_INTERIOR_ERODE_PX = 18
+
 
 def _settings_path():
     """Return a local settings path that survives repo pulls and updates."""
@@ -67,6 +76,7 @@ class ScannerGUI(BaseSorterGUI):
 
         super().__init__(root)
 
+        self._install_card_presence_filter()
         self._restore_session_settings()
         self._session_settings_loading = False
 
@@ -78,6 +88,62 @@ class ScannerGUI(BaseSorterGUI):
             self._last_saved_settings_text = None
 
         self.root.after(_AUTOSAVE_MS, self._autosave_session_settings)
+
+    def _install_card_presence_filter(self):
+        """Reject blank tray-floor rectangles before recognition starts."""
+        scanner = getattr(self, "scanner", None)
+        if scanner is None:
+            return
+
+        original_detector = getattr(scanner, "_find_card_contour", None)
+        if not callable(original_detector):
+            return
+
+        def filtered_detector(frame):
+            card_approx = original_detector(frame)
+            if card_approx is None:
+                return None
+            if self._contour_has_card_detail(frame, card_approx):
+                return card_approx
+            return None
+
+        scanner._find_card_contour = filtered_detector
+
+    @staticmethod
+    def _contour_has_card_detail(frame, card_approx):
+        """Return True when the interior contains normal printed-card detail."""
+        try:
+            if frame is None or card_approx is None:
+                return False
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            mask = np.zeros(gray.shape, dtype=np.uint8)
+            polygon = np.asarray(card_approx, dtype=np.int32).reshape(-1, 2)
+            cv2.fillConvexPoly(mask, polygon, 255)
+
+            # Ignore the card/tray border itself. The tray floor can have a
+            # perfect rectangular outline, but its center is nearly featureless.
+            kernel_size = (_CARD_INTERIOR_ERODE_PX * 2) + 1
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (kernel_size, kernel_size),
+            )
+            interior_mask = cv2.erode(mask, kernel, iterations=1)
+            interior_pixels = cv2.countNonZero(interior_mask)
+            if interior_pixels < 1000:
+                return False
+
+            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+            edges = cv2.Canny(blurred, 45, 135)
+            interior_edges = cv2.bitwise_and(edges, edges, mask=interior_mask)
+            edge_pixels = cv2.countNonZero(interior_edges)
+            edge_density = edge_pixels / float(interior_pixels)
+
+            return edge_density >= _CARD_INTERIOR_MIN_EDGE_DENSITY
+        except Exception:
+            # If the extra guard itself ever fails, preserve the existing
+            # detector behavior rather than disabling scanning entirely.
+            return True
 
     def _persistable_variables(self):
         """Return direct Tk variables that represent operator configuration."""
