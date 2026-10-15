@@ -67,13 +67,13 @@ uint8_t range[6];
 
 byte X_ENDSTOP_MIN, Y_ENDSTOP_MIN, Z_ENDSTOP_MIN, X_ENDSTOP_MAX, Y_ENDSTOP_MAX, Z_ENDSTOP_MAX;
 long zPositionSteps = 0;
-const long Z_SOFT_MAX_STEPS = 95000L;
+const long Z_SOFT_MAX_STEPS = 95935L;
 const long Z_MANUAL_CAL_MAX_STEPS = 103000L;  // Manual calibration only; auto sorting remains constrained above.
 const short PICKUP_CONTACT_MM = 5;
-const long PICKUP_COMPRESSION_STEPS = 1870L;  // ~2.0 mm extra cup compression at Zcal 935.
+const long PICKUP_COMPRESSION_STEPS = 2805L;  // ~3.0 mm extra cup compression at Zcal 935.
 const byte MAX_PICKUP_ATTEMPTS = 3;
 const unsigned short PICKUP_VACUUM_PULSE_MS = 1000;
-const unsigned short VACUUM_CARRY_PULSE_ON_MS = 500;
+const unsigned short VACUUM_CARRY_PULSE_ON_MS = 1000;
 const unsigned short VACUUM_CARRY_CYCLE_MS = 2000;
 const unsigned short RELEASE_PULSE_MS = 250;
 
