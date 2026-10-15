@@ -43,6 +43,8 @@ boolean newData = false, readInProgress = false, newDataFromPC = false;
 boolean atHomePosition = false;
 boolean machineStarted = false;
 boolean abortRequested = false;
+boolean vacuumCarryActive = false;
+unsigned long vacuumCarryCycleStart = 0;
 byte bytesRecvd = 0, PickupRetry;
 const byte numChars = 64, buffSize = 40;
 const char startMarker = '<', endMarker = '>';
@@ -71,6 +73,8 @@ const short PICKUP_CONTACT_MM = 5;
 const long PICKUP_COMPRESSION_STEPS = 1870L;  // ~2.0 mm extra cup compression at Zcal 935.
 const byte MAX_PICKUP_ATTEMPTS = 3;
 const unsigned short PICKUP_VACUUM_PULSE_MS = 1000;
+const unsigned short VACUUM_CARRY_PULSE_ON_MS = 500;
+const unsigned short VACUUM_CARRY_CYCLE_MS = 2000;
 const unsigned short RELEASE_PULSE_MS = 250;
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
@@ -200,6 +204,24 @@ void parseData() {
   strtokIndx = strtok(NULL, ",");
 }
 
+void startVacuumCarryPulse() {
+  vacuumCarryActive = true;
+  vacuumCarryCycleStart = millis();
+  digitalWrite(Vacuum1, HIGH);
+}
+
+void stopVacuumCarryPulse() {
+  vacuumCarryActive = false;
+  digitalWrite(Vacuum1, LOW);
+}
+
+void updateVacuumCarryPulse() {
+  if (!vacuumCarryActive) return;
+
+  unsigned long phase = (millis() - vacuumCarryCycleStart) % VACUUM_CARRY_CYCLE_MS;
+  digitalWrite(Vacuum1, (phase < VACUUM_CARRY_PULSE_ON_MS) ? HIGH : LOW);
+}
+
 boolean checkEmergencyStop() {
   if (abortRequested) return true;
   if (!machineStarted || Serial.available() <= 0) return false;
@@ -209,7 +231,7 @@ boolean checkEmergencyStop() {
   if (incoming == "StopMachine") {
     abortRequested = true;
     machineStarted = false;
-    digitalWrite(Vacuum1, LOW);
+    stopVacuumCarryPulse();
     digitalWrite(Vacuum2, LOW);
     Serial.println("<OK,MachineStopped>");
     PrintLCD("STOPPED", "Cycle aborted");
@@ -222,6 +244,7 @@ boolean checkEmergencyStop() {
 boolean delayWithStop(unsigned long waitMs) {
   unsigned long startedAt = millis();
   while (millis() - startedAt < waitMs) {
+    updateVacuumCarryPulse();
     if (abortRequested) return false;
     if (machineStarted && checkEmergencyStop()) return false;
     delay(10);
@@ -234,7 +257,7 @@ boolean pick(long steps, byte Release) {
     Move1(0, steps, zspeed);
     if (abortRequested) return false;
 
-    digitalWrite(Vacuum1, LOW);
+    stopVacuumCarryPulse();
     if (!delayWithStop(100)) return false;
 
     MotorsOnOff(1);
@@ -258,48 +281,35 @@ boolean pick(long steps, byte Release) {
     Move1(0, steps, zspeed);
     if (abortRequested) return false;
 
-    // Active pickup mode: pulse Vac1 long enough to establish the seal,
-    // then shut the pump off before lifting.  The vacuum line/cup should
-    // retain enough vacuum to carry the card mechanically.
+    // Establish the seal, then use a low-duty keep-alive pulse while the
+    // card is being lifted and carried. This compensates for a slow leak
+    // without requiring Vacuum1 to run continuously for the whole cycle.
     digitalWrite(Vacuum1, HIGH);
     if (!delayWithStop(PICKUP_VACUUM_PULSE_MS)) {
       digitalWrite(Vacuum1, LOW);
       return false;
     }
-    digitalWrite(Vacuum1, LOW);
-
-    // Previous continuous-hold pickup mode retained here for easy rollback.
-    // To restore it, replace the pulse block above and the Move1 block below
-    // with this commented section.
-    /*
-    digitalWrite(Vacuum1, HIGH);
-    if (!delayWithStop(1000)) {
-      digitalWrite(Vacuum1, LOW);
-      return false;
-    }
+    startVacuumCarryPulse();
 
     Move1(1, steps, zespeed);
     if (abortRequested) {
-      digitalWrite(Vacuum1, LOW);
+      stopVacuumCarryPulse();
       return false;
     }
-    */
-
-    Move1(1, steps, zespeed);
-    if (abortRequested) return false;
 
     ReadRange(3);
     if (((range[2] + range[3]) / 2) <= pickup_threshold) {
       return true;
     }
 
+    stopVacuumCarryPulse();
     PickupRetry++;
     if (PickupRetry < MAX_PICKUP_ATTEMPTS) {
       if (!delayWithStop(150)) return false;
     }
   }
 
-  digitalWrite(Vacuum1, LOW);
+  stopVacuumCarryPulse();
   digitalWrite(Vacuum2, LOW);
   machineStarted = false;
   REPORT_ERROR(EC_PICKUP_RETRY, "3 retries failed");
@@ -366,7 +376,7 @@ void Homemachine() {
 void StopMachine() {
   abortRequested = true;
   machineStarted = false;
-  digitalWrite(Vacuum1, LOW);
+  stopVacuumCarryPulse();
   digitalWrite(Vacuum2, LOW);
   PrintLCD("STOPPED", "Cycle aborted");
 }
@@ -629,7 +639,7 @@ void Tray(short var) {
 
   if (!pick(pickupSteps, 0)) {
     // A normal pickup failure leaves Z at the initial 6000-step pickup height.
-    // Return to home height.  An emergency stop, however, stops immediately.
+    // Return to home height. An emergency stop, however, stops immediately.
     if (!abortRequested) {
       Move1(1, initial_pickup_distance, zespeed);
       zPositionSteps = 0;
@@ -699,6 +709,7 @@ void Move4(boolean dir1, boolean dir3, short steps1, short steps2) {
 
   for (short i = 0; (i < steps1 || i < steps2); i++) {
     if (abortRequested) break;
+    if ((i % 10) == 0) updateVacuumCarryPulse();
     if (machineStarted && (i % 25 == 0) && checkEmergencyStop()) break;
 
     if (i < steps1) {
@@ -716,6 +727,7 @@ void Move4(boolean dir1, boolean dir3, short steps1, short steps2) {
     digitalWrite(E1step, LOW);
     delayMicroseconds(speed);
   }
+  updateVacuumCarryPulse();
 }
 
 void Move1CalibrationDown(long steps, short speed1) {
@@ -755,6 +767,7 @@ void Move1(boolean dir, long steps, short speed1) {
   digitalWrite(Zdir, dir);
   for (long i = 0; i < steps; i++) {
     if (abortRequested) break;
+    if ((i % 100L) == 0) updateVacuumCarryPulse();
     if (machineStarted && (i % 200L == 0) && checkEmergencyStop()) break;
 
     digitalWrite(Zstep, HIGH);
@@ -768,6 +781,7 @@ void Move1(boolean dir, long steps, short speed1) {
       zPositionSteps--;
     }
   }
+  updateVacuumCarryPulse();
 }
 
 void PrintLCD(String var1, String var2) {
