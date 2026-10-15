@@ -71,7 +71,7 @@ const long Z_SOFT_MAX_STEPS = 95935L;
 const long Z_MANUAL_CAL_MAX_STEPS = 103000L;  // Manual calibration only; auto sorting remains constrained above.
 const short PICKUP_CONTACT_MM = 5;
 const long PICKUP_COMPRESSION_STEPS = 2805L;  // ~3.0 mm extra cup compression at Zcal 935.
-const long CARRY_CLEARANCE_STEPS = 3740L;     // ~4.0 mm extra lift before X/Y travel at Zcal 935.
+const long CARRY_CLEARANCE_STEPS = 6000L;     // Return from the sensing height to the pickup-cycle Z=0 travel height.
 const byte MAX_PICKUP_ATTEMPTS = 3;
 const unsigned short PICKUP_VACUUM_PULSE_MS = 1000;
 const unsigned short VACUUM_CARRY_PULSE_ON_MS = 1000;
@@ -651,9 +651,9 @@ void Tray(short var) {
     return;
   }
 
-  // Raise the card another ~4 mm before any X/Y travel so it clears the
-  // pickup container lip. The same amount is added back to the drop descent
-  // so the physical drop height remains unchanged.
+  // A successful pick returns to the 6000-step sensing height. Raise the
+  // remaining 6000 steps back to the pickup-cycle Z=0 travel height before
+  // any X/Y movement. This keeps every carry move at the same known height.
   Move1(1, CARRY_CLEARANCE_STEPS, zespeed);
   if (abortRequested) return;
 
@@ -699,12 +699,9 @@ void Tray(short var) {
   Move4(moveBackDirectionX, moveBackDirectionY, absX, absY);
   if (abortRequested) return;
 
-  long returnToHomeSteps = (long)initial_pickup_distance - CARRY_CLEARANCE_STEPS;
-  if (returnToHomeSteps > 0) {
-    Move1(1, returnToHomeSteps, zespeed);
-  }
-  if (abortRequested) return;
-
+  // pick(..., Release=1) already returned Z by the full dropSteps, which puts
+  // it back at the pickup-cycle Z=0 travel height. No extra Z correction is
+  // needed before the next card.
   if (y != 0) { Move4(0, 0, 0, YCourseCorrection); }
   if (x != 0) { Move4(0, 1, XCourseCorrection, 0); }
   if (abortRequested) return;
