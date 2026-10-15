@@ -179,12 +179,13 @@ class ScannerGUI(BaseScannerGUI):
         self._install_serial_port_selector(parent)
         self._install_firmware_loader()
 
-        # Keep the GUI's initial Z values aligned with the calibrated firmware
-        # defaults so an Upload cannot accidentally restore older settings.
+        # Keep the GUI's initial motion/calibration values aligned with the
+        # tuned firmware defaults so an Upload cannot restore older speeds.
         try:
+            self.param_vars["speed"].set("650")
             self.param_vars["zcal"].set("935")
-            self.param_vars["zspeed"].set("40")
-            self.param_vars["zespeed"].set("55")
+            self.param_vars["zspeed"].set("38")
+            self.param_vars["zespeed"].set("52")
         except Exception:
             pass
 
