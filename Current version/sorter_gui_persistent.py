@@ -17,7 +17,7 @@ import numpy as np
 from sorter_gui_main import ScannerGUI as BaseSorterGUI
 
 
-_SETTINGS_VERSION = 2
+_SETTINGS_VERSION = 3
 _AUTOSAVE_MS = 500
 
 # These are live/operational states, not configuration. Restoring them after a
@@ -276,18 +276,27 @@ class ScannerGUI(BaseSorterGUI):
             variables = saved.get("variables", {})
             variable_dicts = saved.get("variable_dicts", {})
 
-            # Version 2 raises travel speed slightly. Only migrate fields that
-            # still contain the exact old known defaults; operator-customized
-            # values are left alone.
-            if saved_version < 2:
-                params = variable_dicts.get("param_vars")
-                if isinstance(params, dict):
-                    motion_default_migration = {
+            # Motion-default migrations only touch the exact known prior
+            # defaults. Any operator-customized speed remains untouched.
+            params = variable_dicts.get("param_vars")
+            if isinstance(params, dict):
+                if saved_version < 2:
+                    first_motion_migration = {
                         "speed": ("700", "650"),
                         "zspeed": ("40", "38"),
                         "zespeed": ("55", "52"),
                     }
-                    for key, (old_value, new_value) in motion_default_migration.items():
+                    for key, (old_value, new_value) in first_motion_migration.items():
+                        if str(params.get(key, "")) == old_value:
+                            params[key] = new_value
+
+                if saved_version < 3:
+                    second_motion_migration = {
+                        "speed": ("650", "600"),
+                        "zspeed": ("38", "36"),
+                        "zespeed": ("52", "50"),
+                    }
+                    for key, (old_value, new_value) in second_motion_migration.items():
                         if str(params.get(key, "")) == old_value:
                             params[key] = new_value
 
