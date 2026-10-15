@@ -71,11 +71,14 @@ const long Z_SOFT_MAX_STEPS = 95935L;
 const long Z_MANUAL_CAL_MAX_STEPS = 103000L;  // Manual calibration only; auto sorting remains constrained above.
 const short PICKUP_CONTACT_MM = 5;
 const long PICKUP_COMPRESSION_STEPS = 2805L;  // ~3.0 mm extra cup compression at Zcal 935.
+const long CARRY_CLEARANCE_STEPS = 3740L;     // ~4.0 mm extra lift before X/Y travel at Zcal 935.
 const byte MAX_PICKUP_ATTEMPTS = 3;
 const unsigned short PICKUP_VACUUM_PULSE_MS = 1000;
 const unsigned short VACUUM_CARRY_PULSE_ON_MS = 1000;
-const unsigned short VACUUM_CARRY_CYCLE_MS = 2000;
+const unsigned short VACUUM_CARRY_PULSE_GAP_MS = 1250;
+const unsigned short VACUUM_CARRY_CYCLE_MS = VACUUM_CARRY_PULSE_ON_MS + VACUUM_CARRY_PULSE_GAP_MS;
 const unsigned short RELEASE_PULSE_MS = 250;
+const unsigned short DROP_SETTLE_MS = 3000;
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
 short Xcal = 350, Ycal = 475, Zcal = 935;
@@ -271,7 +274,7 @@ boolean pick(long steps, byte Release) {
     digitalWrite(Vacuum2, LOW);
 
     MotorsOnOff(0);
-    if (!delayWithStop(100)) return false;
+    if (!delayWithStop(DROP_SETTLE_MS)) return false;
     Move1(1, steps, zespeed);
     return !abortRequested;
   }
@@ -648,6 +651,12 @@ void Tray(short var) {
     return;
   }
 
+  // Raise the card another ~4 mm before any X/Y travel so it clears the
+  // pickup container lip. The same amount is added back to the drop descent
+  // so the physical drop height remains unchanged.
+  Move1(1, CARRY_CLEARANCE_STEPS, zespeed);
+  if (abortRequested) return;
+
   upcount++;
   CountArray[var]++;
 
@@ -681,7 +690,8 @@ void Tray(short var) {
   Move4(moveToDirectionX, moveToDirectionY, absX, absY);
   if (abortRequested) return;
 
-  if (!pick(initial_drop_distance, 1)) return;
+  long dropSteps = (long)initial_drop_distance + CARRY_CLEARANCE_STEPS;
+  if (!pick(dropSteps, 1)) return;
   if (abortRequested) return;
 
   int moveBackDirectionX = (x >= 0) ? 0 : 1;
@@ -689,7 +699,10 @@ void Tray(short var) {
   Move4(moveBackDirectionX, moveBackDirectionY, absX, absY);
   if (abortRequested) return;
 
-  Move1(1, initial_pickup_distance, zespeed);
+  long returnToHomeSteps = (long)initial_pickup_distance - CARRY_CLEARANCE_STEPS;
+  if (returnToHomeSteps > 0) {
+    Move1(1, returnToHomeSteps, zespeed);
+  }
   if (abortRequested) return;
 
   if (y != 0) { Move4(0, 0, 0, YCourseCorrection); }
