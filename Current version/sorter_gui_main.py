@@ -8,7 +8,7 @@ Adds:
 - Faster, thread-safe Arduino sensor monitoring.
 - Correct mapping of firmware endstop keys (xmin/xmax/etc.) to GUI labels.
 - Explicit Sort,<value> framing for card-routing commands.
-- A longer serial reply window while a physical sort is in progress.
+- A longer serial reply window while a physical sort or homing operation is in progress.
 - An immediate StopMachine write that can interrupt an active sort transaction.
 - A touchscreen-friendly detected COM-port dropdown with Refresh.
 - A touchscreen Arduino .ino firmware loader using arduino-cli.
@@ -619,7 +619,7 @@ class ScannerGUI(BaseScannerGUI):
         messagebox.showinfo(
             "Firmware Upload",
             "Firmware uploaded successfully.\n\n"
-            "Allow the Arduino to reboot/home, then tap Connect.",
+            "Allow the Arduino to reboot, then tap Connect.",
         )
 
     def _firmware_upload_failed(self, error_text):
@@ -688,13 +688,12 @@ class ScannerGUI(BaseScannerGUI):
 
         wire_cmd = text if is_control else f"Sort,{text}"
 
-        # A calibrated sort contains long Z travel plus X/Y travel and card
-        # release. Keep the scan transaction locked until the Arduino reports
-        # completion so the same card cannot be rescanned and the live monitor
-        # cannot consume the sort reply.
+        # Sort and homing commands can involve long physical motion. Keep their
+        # transaction open until the Arduino reports completion so the GUI does
+        # not falsely report a timeout while the machine is still moving.
         serial_obj = None
         old_timeout = None
-        if wire_cmd.startswith("Sort,"):
+        if wire_cmd.startswith("Sort,") or wire_cmd in ("StartMachine", "HomeButton"):
             try:
                 serial_obj = getattr(self.scanner, "ser", None)
                 if serial_obj is not None:
