@@ -75,14 +75,13 @@ const long CARRY_CLEARANCE_STEPS = 6000L;     // Return from the sensing height 
 const byte MAX_PICKUP_ATTEMPTS = 3;
 const unsigned short PICKUP_VACUUM_PULSE_MS = 1000;
 const unsigned short VACUUM_CARRY_PULSE_ON_MS = 1000;
-const unsigned short VACUUM_CARRY_PULSE_GAP_MS = 1250;
+const unsigned short VACUUM_CARRY_PULSE_GAP_MS = 1500;
 const unsigned short VACUUM_CARRY_CYCLE_MS = VACUUM_CARRY_PULSE_ON_MS + VACUUM_CARRY_PULSE_GAP_MS;
-const unsigned short RELEASE_PULSE_MS = 250;
-const unsigned short DROP_SETTLE_MS = 3000;
+const unsigned short DROP_SETTLE_MS = 2500;
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
 short Xcal = 350, Ycal = 475, Zcal = 935;
-short speed = 700, zspeed = 40, zespeed = 55;
+short speed = 650, zspeed = 38, zespeed = 52;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
 
@@ -260,20 +259,15 @@ boolean pick(long steps, byte Release) {
     Move1(0, steps, zspeed);
     if (abortRequested) return false;
 
+    // Drop by stopping the pickup vacuum and allowing the card to settle.
+    // Vacuum2 is intentionally not used in the automatic sort cycle.
     stopVacuumCarryPulse();
     if (!delayWithStop(100)) return false;
 
     MotorsOnOff(1);
     if (!delayWithStop(100)) return false;
-
-    digitalWrite(Vacuum2, HIGH);
-    if (!delayWithStop(RELEASE_PULSE_MS)) {
-      digitalWrite(Vacuum2, LOW);
-      return false;
-    }
-    digitalWrite(Vacuum2, LOW);
-
     MotorsOnOff(0);
+
     if (!delayWithStop(DROP_SETTLE_MS)) return false;
     Move1(1, steps, zespeed);
     return !abortRequested;
