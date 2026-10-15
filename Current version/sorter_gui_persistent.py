@@ -14,7 +14,7 @@ import tkinter as tk
 from sorter_gui_main import ScannerGUI as BaseSorterGUI
 
 
-_SETTINGS_VERSION = 1
+_SETTINGS_VERSION = 2
 _AUTOSAVE_MS = 500
 
 # These are live/operational states, not configuration. Restoring them after a
@@ -206,8 +206,24 @@ class ScannerGUI(BaseSorterGUI):
             with open(self._session_settings_path, "r", encoding="utf-8") as handle:
                 saved = json.load(handle)
 
+            saved_version = int(saved.get("version", 1) or 1)
             variables = saved.get("variables", {})
             variable_dicts = saved.get("variable_dicts", {})
+
+            # Version 2 raises travel speed slightly. Only migrate fields that
+            # still contain the exact old known defaults; operator-customized
+            # values are left alone.
+            if saved_version < 2:
+                params = variable_dicts.get("param_vars")
+                if isinstance(params, dict):
+                    motion_default_migration = {
+                        "speed": ("700", "650"),
+                        "zspeed": ("40", "38"),
+                        "zespeed": ("55", "52"),
+                    }
+                    for key, (old_value, new_value) in motion_default_migration.items():
+                        if str(params.get(key, "")) == old_value:
+                            params[key] = new_value
 
             # Preserve dependent filters until after game selection has rebuilt
             # the Set/Rarity/Foil choices.
