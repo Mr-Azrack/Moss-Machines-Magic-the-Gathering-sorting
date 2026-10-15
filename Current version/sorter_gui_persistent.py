@@ -18,8 +18,9 @@ import numpy as np
 from sorter_gui_main import ScannerGUI as BaseSorterGUI
 
 
-_SETTINGS_VERSION = 5
+_SETTINGS_VERSION = 6
 _AUTOSAVE_MS = 500
+_CAMERA_WIDTH_SCALE = 0.75
 
 # Current tuned motion defaults. Lower pulse-delay values mean faster motion.
 _MOTION_DEFAULTS = {
@@ -183,6 +184,22 @@ class ScannerGUI(BaseSorterGUI):
         except Exception:
             pass
 
+    def _apply_camera_width_reduction(self):
+        """Give the control panel more width while preserving camera height."""
+        try:
+            compact = bool(self.compact_mode_var.get())
+        except Exception:
+            compact = False
+
+        base_width = 480 if compact else 600
+        self.canvas_width = max(300, int(round(base_width * _CAMERA_WIDTH_SCALE)))
+
+        try:
+            if getattr(self, "canvas", None) is not None:
+                self.canvas.configure(width=self.canvas_width)
+        except Exception:
+            pass
+
     def _apply_touch_sizing(self):
         """Apply the requested large touch targets without changing functionality."""
         style = ttk.Style(self.root)
@@ -190,9 +207,12 @@ class ScannerGUI(BaseSorterGUI):
         # Top notebook tabs: roughly twice the previous vertical height.
         style.configure("TNotebook.Tab", padding=(8, 10))
 
-        # Scanner-tab-only ttk styles so Arduino/Export/etc. controls are not enlarged.
-        style.configure("Scanner.TCombobox", padding=(6, 8), font=("Segoe UI", 11))
-        style.configure("Scanner.TButton", padding=(8, 8), font=("Segoe UI", 10, "bold"))
+        # Preserve the tall Scanner controls while reducing horizontal footprint.
+        style.configure("Scanner.TCombobox", padding=(4, 8), font=("Segoe UI", 10))
+        style.configure("Scanner.TButton", padding=(5, 8), font=("Segoe UI", 10, "bold"))
+
+        # Shrink only the camera width to free room for the right-side controls.
+        self._apply_camera_width_reduction()
 
         # Camera Start/Stop live beside the scanner rather than inside the tab,
         # so size them explicitly. Compact mode is allowed to change the rest of
@@ -271,7 +291,7 @@ class ScannerGUI(BaseSorterGUI):
         return None
 
     def _install_parameter_touch_controls(self):
-        """Replace keyboard-oriented parameter entries with large arrow controls."""
+        """Replace keyboard-oriented parameter entries with compact arrow controls."""
         params_frame = self._find_parameter_frame()
         if params_frame is None:
             return
@@ -309,17 +329,17 @@ class ScannerGUI(BaseSorterGUI):
                 bg="#242424",
                 relief=tk.GROOVE,
                 bd=1,
-                padx=4,
+                padx=3,
                 pady=4,
             )
-            group.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+            group.grid(row=row, column=col, padx=2, pady=4, sticky="nsew")
 
             tk.Label(
                 group,
                 text=label,
                 bg="#242424",
                 fg="#dddddd",
-                font=("Segoe UI", 10, "bold"),
+                font=("Segoe UI", 9, "bold"),
             ).pack(pady=(0, 3))
 
             control_row = tk.Frame(group, bg="#242424")
@@ -335,23 +355,23 @@ class ScannerGUI(BaseSorterGUI):
                 fg="white",
                 activebackground="#546E7A",
                 activeforeground="white",
-                font=("Segoe UI Symbol", 12, "bold"),
-                width=3,
+                font=("Segoe UI Symbol", 11, "bold"),
+                width=2,
                 pady=9,
                 relief=tk.FLAT,
                 takefocus=False,
             )
-            down_button.pack(side=tk.LEFT, padx=(0, 3))
+            down_button.pack(side=tk.LEFT, padx=(0, 2))
 
             entry = tk.Entry(
                 control_row,
                 textvariable=self.param_vars[key],
-                width=6,
+                width=5,
                 justify=tk.CENTER,
                 bg="#404040",
                 fg="#ffffff",
                 insertbackground="#ffffff",
-                font=("Segoe UI", 13, "bold"),
+                font=("Segoe UI", 12, "bold"),
                 relief=tk.FLAT,
             )
             entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=11)
@@ -366,13 +386,13 @@ class ScannerGUI(BaseSorterGUI):
                 fg="white",
                 activebackground="#546E7A",
                 activeforeground="white",
-                font=("Segoe UI Symbol", 12, "bold"),
-                width=3,
+                font=("Segoe UI Symbol", 11, "bold"),
+                width=2,
                 pady=9,
                 relief=tk.FLAT,
                 takefocus=False,
             )
-            up_button.pack(side=tk.LEFT, padx=(3, 0))
+            up_button.pack(side=tk.LEFT, padx=(2, 0))
 
             self._touch_param_entries[key] = entry
             self._touch_param_buttons.extend((down_button, up_button))
@@ -394,10 +414,10 @@ class ScannerGUI(BaseSorterGUI):
         variable.set(str(value))
 
     def _refresh_parameter_touch_sizing(self):
-        """Keep parameter arrows/value fields large after compact-mode changes."""
+        """Keep parameter arrows/value fields tall but horizontally compact."""
         for entry in getattr(self, "_touch_param_entries", {}).values():
             try:
-                entry.configure(font=("Segoe UI", 13, "bold"))
+                entry.configure(font=("Segoe UI", 12, "bold"), width=5)
                 info = entry.pack_info()
                 entry.pack_configure(ipady=max(11, int(info.get("ipady", 0) or 0)))
             except Exception:
@@ -405,7 +425,11 @@ class ScannerGUI(BaseSorterGUI):
 
         for button in getattr(self, "_touch_param_buttons", []):
             try:
-                button.configure(font=("Segoe UI Symbol", 12, "bold"), pady=9)
+                button.configure(
+                    font=("Segoe UI Symbol", 11, "bold"),
+                    width=2,
+                    pady=9,
+                )
             except Exception:
                 pass
 
