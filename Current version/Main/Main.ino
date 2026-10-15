@@ -81,7 +81,7 @@ const unsigned short DROP_SETTLE_MS = 2500;
 
 short initial_pickup_distance = 6000, initial_drop_distance = 4000;
 short Xcal = 350, Ycal = 475, Zcal = 935;
-short speed = 600, zspeed = 36, zespeed = 50;
+short speed = 500, zspeed = 28, zespeed = 36;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
 
