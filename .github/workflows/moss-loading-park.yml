@@ -24,6 +24,8 @@ jobs:
           python -m py_compile "Current version/gui_interface_enhanced.py" "Current version/error_codes.py"
       - name: Verify loading-state GUI interlocks
         run: python -m unittest discover -s "Current version/tests" -p "test_loading_park_gui.py" -v
+      - name: Verify full-height card release path
+        run: python -m unittest discover -s "Current version/tests" -p "test_full_height_drop.py" -v
   firmware-compile:
     runs-on: ubuntu-latest
     steps:
