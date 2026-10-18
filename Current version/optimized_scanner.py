@@ -67,6 +67,7 @@ from error_codes import format_log as _elog
 
 # Import collection manager
 from card_collection_manager import CardCollectionManager
+from identification_safety import choose_safe_match
 from mtg_symbol_recognizer import (
     load_set_symbols,
     match_symbol_template,
@@ -243,6 +244,11 @@ class OptimizedCardScanner:
 
         # Matching parameters (can be adjusted by GUI at runtime)
         self.scan_threshold = 90
+        # Independent checks for AUTOMATIC sorting. GUI threshold only controls
+        # candidate retrieval; it must not be treated as proof of identity.
+        self.auto_sort_min_phash_confidence = 85.0
+        self.auto_sort_min_distance_gap = 4.0
+        self.last_identification_reject_reason = None
         
         # Performance stats
         self.stats = {
@@ -866,9 +872,8 @@ class OptimizedCardScanner:
             foil_type_filter: List of foil types (subTypeName values) to filter by (None = all types)
             rarity_filter: List of rarity codes to filter by (None = all rarities)
         """
-        if found_exact.is_set():
-            return []  # Another thread found exact match, abort
-        
+        # Scan all rows: a zero-distance match can have identical-printing
+        # competitors, so stopping early makes ambiguity invisible.
         cursor = self.get_connection()
         matches = []
         
@@ -904,10 +909,6 @@ class OptimizedCardScanner:
             candidate_ids = []
             candidate_rows = []
             for card in cards:
-                if found_exact.is_set():
-                    break  # Exact match found by another thread
-
-
                 # Card is a dict (from pHash DB)
                 product_id = card.get('product_id')
                 if product_id is not None:
@@ -970,10 +971,11 @@ class OptimizedCardScanner:
                         'dist_b': dist_b
                     })
 
-                    # Exact match found!
-                    if avg_distance == 0:
-                        found_exact.set()
-                        break
+            # Limit metadata lookup to nearest candidates per game. This also
+            # prevents oversized SQL IN queries when the GUI threshold is 90.
+            candidate_rows.sort(key=lambda m: m['distance'])
+            candidate_rows = candidate_rows[:100]
+            candidate_ids = [m['product_id'] for m in candidate_rows if m.get('product_id')]
             
             # Enrich candidates with unified metadata
             meta_map = {}
@@ -1098,9 +1100,7 @@ class OptimizedCardScanner:
                 matches = future.result()
                 all_matches.extend(matches)
                 
-                # If exact match found, cancel remaining tasks
-                if found_exact.is_set():
-                    break
+                # Do not exit on an exact match: other printings may tie.
         
         # Sort by distance
         # Deduplicate matches by product_id (faster than complex tuple key)
@@ -1345,9 +1345,14 @@ class OptimizedCardScanner:
                                 self.send_to_arduino(bin_result)
                         else:
                             self._handle_unrecognized_card(display_frame, card_approx, "In inventory")
+                            if self.ser:
+                                self.send_to_arduino("RejectCard")
                     else:
-                        self._handle_unrecognized_card(display_frame, card_approx, "Card not found in database")
-                    
+                        reason = self.last_identification_reject_reason or "Card not found in database"
+                        self._handle_unrecognized_card(display_frame, card_approx, reason)
+                        if self.ser:
+                            self.send_to_arduino("RejectCard")
+
                     cv2.imshow("Detected Card", display_frame)
                 else:
                     cv2.imshow("Detected Card", display_frame)
@@ -1456,6 +1461,7 @@ class OptimizedCardScanner:
         Extract and process card from contour
         Returns card info dict or None
         """
+        self.last_identification_reject_reason = "capture_or_processing_failure"
         try:
             # Use the internal perspective correction
             warped = self._get_perspective_corrected_card(frame, card_approx)
@@ -1496,35 +1502,52 @@ class OptimizedCardScanner:
             # Scan the card using existing scan path which computes pHash identically
             # Use current scanner threshold (GUI can update this live)
             scan_threshold = getattr(self, 'scan_threshold', 40)
-            matches, _ = self.scan_card(pil_image, threshold=scan_threshold, top_n=3)
+            matches, _ = self.scan_card(pil_image, threshold=scan_threshold, top_n=50)
 
-            if matches and len(matches) > 0:
-                card_info = matches[0]
+            # MTG symbols are an independent tiebreaker ONLY for real database
+            # candidates. Never change a printing's 'set' without its product ID.
+            symbol_set, symbol_conf, symbol_scores = None, 0.0, {}
+            if matches and self.enable_set_symbol_check:
+                top = matches[0]
+                if 'magic' in (top.get('game') or '').lower():
+                    try:
+                        symbol_set, symbol_conf, symbol_scores = self._select_set_by_symbol(
+                            cropped, top.get('name')
+                        )
+                    except Exception as symbol_error:
+                        print(f"[!] Set-symbol check unavailable: {symbol_error}")
 
-                # Secondary MTG set symbol verification
-                game_name = (card_info.get('game') or '').lower()
-                if self.enable_set_symbol_check and 'magic' in game_name:
-                    card_name = card_info.get('name')
-                    phash_set = card_info.get('set')
-                    resolved_set, resolved_conf, conf_map = self._select_set_by_symbol(cropped, card_name)
-                    if resolved_set:
-                        if phash_set and phash_set in conf_map:
-                            phash_conf = conf_map.get(phash_set, 0.0)
-                            if resolved_set != phash_set and (resolved_conf - phash_conf) < 0.08:
-                                print(
-                                    f"[!] Symbol match close; keeping pHash set {phash_set} "
-                                    f"(symbol best={resolved_set} {resolved_conf:.3f}, phash={phash_conf:.3f})"
-                                )
-                            else:
-                                card_info['set'] = resolved_set
-                                print(f"[+] Symbol verification matched set: {resolved_set}")
-                        else:
-                            card_info['set'] = resolved_set
-                            print(f"[+] Symbol verification matched set: {resolved_set}")
-                    else:
-                        print("[!] Symbol verification inconclusive; keeping pHash result")
+            card_info, reason = choose_safe_match(
+                matches,
+                min_phash_confidence=self.auto_sort_min_phash_confidence,
+                min_gap=self.auto_sort_min_distance_gap,
+                symbol_set=symbol_set,
+                symbol_confidence=symbol_conf,
+                symbol_scores=symbol_scores,
+                symbol_min_confidence=self.symbol_min_confidence,
+            )
+            self.last_identification_reject_reason = None if card_info else reason
+            if card_info is None:
+                print(f"[!] Unsafe card identification rejected: {reason}")
+                for possible in matches[:3]:
+                    print(
+                        f"    candidate: {possible.get('name')} "
+                        f"{possible.get('set')} #{possible.get('number')} "
+                        f"product={possible.get('product_id')} "
+                        f"distance={possible.get('distance')}"
+                    )
+                return None
 
-                return card_info
+            if str(card_info.get('product_id')) != str(matches[0].get('product_id')):
+                print(
+                    f"[+] Set symbol chose actual printing "
+                    f"{card_info.get('product_id')} ({card_info.get('set')}); "
+                    f"nearest pHash printing was {matches[0].get('product_id')}"
+                )
+            # Always return metadata belonging to the selected product ID.
+            card_info = dict(card_info)
+            card_info['identification_status'] = 'verified'
+            return card_info
 
             return None
 
