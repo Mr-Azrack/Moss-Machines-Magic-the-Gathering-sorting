@@ -21,6 +21,7 @@
 #define EC_HOME_Z_FAIL        "E512"
 #define EC_BUF_OVERFLOW       "E513"
 #define EC_UNKNOWN_CMD        "E514"
+#define EC_LOADING_POSITION   "E515"
 
 #define REPORT_ERROR(code, msg) \
   do { \
@@ -42,6 +43,8 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 boolean newData = false, readInProgress = false, newDataFromPC = false;
 boolean atHomePosition = false;
 boolean machineStarted = false;
+boolean loadingParked = false;           // X/Y at the loading clearance position
+boolean loadingReturnReady = false;      // Returned directly without re-homing into a loaded hopper
 boolean abortRequested = false;
 boolean vacuumCarryActive = false;
 unsigned long vacuumCarryCycleStart = 0;
@@ -84,6 +87,10 @@ short Xcal = 350, Ycal = 475, Zcal = 935;
 short speed = 500, zspeed = 28, zespeed = 36;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
+// Park at the same calibrated +3X/+2Y corner used by normal sorting.
+// This is a known, existing travel envelope, at the fully raised Z=0 height.
+const short LOADING_PARK_X_PITCHES = 3;
+const short LOADING_PARK_Y_PITCHES = 2;
 
 void setup() {
   byte pins[] = { Xstep, Ystep, Zstep, E0step, E1step, Xdir, Ydir, Zdir, E0dir, E1dir, Xenable, Yenable, Zenable, E0enable, E1enable, Vacuum1, Vacuum2, Lights};
@@ -315,6 +322,8 @@ boolean pick(long steps, byte Release) {
 }
 
 void Homemachine() {
+  abortRequested = false;  // A deliberate HomeButton may follow StopMachine.
+  loadingReturnReady = false;
   PrintLCD("Calibrating", " ");
   atHomePosition = false;
   ReadEndstops();
@@ -341,7 +350,7 @@ void Homemachine() {
       Y_ENDSTOP_MIN = digitalRead(Ymin);
       if (millis() - t1 > 10000) {
         REPORT_ERROR(EC_HOME_Y_FAIL, "Y endstop");
-        break;
+        return;
       }
     }
     delay(200);
@@ -355,7 +364,7 @@ void Homemachine() {
       X_ENDSTOP_MAX = digitalRead(Xmax);
       if (millis() - t2 > 10000) {
         REPORT_ERROR(EC_HOME_X_FAIL, "X endstop");
-        break;
+        return;
       }
     }
     delay(200);
@@ -368,6 +377,55 @@ void Homemachine() {
   zPositionSteps = 0;
   abortRequested = false;
   atHomePosition = true;
+  Serial.println("<OK,MachineHomed>");
+}
+
+// The operator presses LOAD CARDS only while stopped and at known pickup home.
+// Deliberately stay at Z=0 (fully raised); no descent near cards is allowed.
+void ParkForLoading() {
+  if (machineStarted) { REPORT_ERROR(EC_CMD_STARTED, "Stop first"); return; }
+  if (loadingParked) { Serial.println("<OK,LoadingParked>"); return; }
+  if (!atHomePosition || zPositionSteps != 0 || Xcal <= 0 || Ycal <= 0) {
+    REPORT_ERROR(EC_LOADING_POSITION, "Home first");
+    return;
+  }
+  abortRequested = false;
+  stopVacuumCarryPulse();
+  digitalWrite(Vacuum2, LOW);
+  atHomePosition = false;
+  loadingReturnReady = false;
+  Move4(1, 0, Xcal * LOADING_PARK_X_PITCHES, Ycal * LOADING_PARK_Y_PITCHES);
+  if (abortRequested) {
+    loadingParked = false;  // Unknown XY; require manual recovery, not inverse motion.
+    REPORT_ERROR(EC_LOADING_POSITION, "Park interrupted");
+    return;
+  }
+  loadingParked = true;
+  Serial.println("<OK,LoadingParked>");
+  PrintLCD("LOAD CARDS", "Head parked");
+}
+
+// Move back by the *exact inverse* of the park move. Do not run a homing
+// sequence over the freshly loaded stack. START then skips its usual home once.
+void ReturnFromLoading() {
+  if (machineStarted) { REPORT_ERROR(EC_CMD_STARTED, "Stop first"); return; }
+  if (!loadingParked || zPositionSteps != 0) {
+    REPORT_ERROR(EC_LOADING_POSITION, "Not parked");
+    return;
+  }
+  abortRequested = false;
+  Move4(0, 1, Xcal * LOADING_PARK_X_PITCHES, Ycal * LOADING_PARK_Y_PITCHES);
+  if (abortRequested) {
+    loadingParked = false;  // Unknown XY; do not assume a valid home.
+    atHomePosition = false;
+    REPORT_ERROR(EC_LOADING_POSITION, "Return interrupted");
+    return;
+  }
+  loadingParked = false;
+  atHomePosition = true;
+  loadingReturnReady = true;
+  Serial.println("<OK,LoadingReady>");
+  PrintLCD("READY TO SORT", "Press START");
 }
 
 void StopMachine() {
@@ -447,14 +505,31 @@ void DetermineAction() {
     }
   }
 
+  if (Tempval1 == "ParkForLoading") {
+    ParkForLoading();
+    return;
+  } else if (Tempval1 == "ReturnFromLoading") {
+    ReturnFromLoading();
+    return;
+  }
+
   if (Tempval1 == "StartMachine") {
-    abortRequested = false;
-    machineStarted = false;
-    Homemachine();
-    if (!atHomePosition) {
-      PrintLCD("START FAILED", "Home failed");
+    if (loadingParked) {
+      REPORT_ERROR(EC_LOADING_POSITION, "Return first");
       return;
     }
+    abortRequested = false;
+    machineStarted = false;
+    // After loading, use the verified inverse XY move rather than a fresh
+    // homing descent into a hopper that now contains cards.
+    if (!(loadingReturnReady && atHomePosition && zPositionSteps == 0)) {
+      Homemachine();
+      if (!atHomePosition) {
+        PrintLCD("START FAILED", "Home failed");
+        return;
+      }
+    }
+    loadingReturnReady = false;
     machineStarted = true;
     Serial.println("<OK,MachineStarted>");
     PrintLCD("Machine STARTED", "Accepting cards");
@@ -484,11 +559,20 @@ void DetermineAction() {
       Tempval1 == "CalibrateY1" || Tempval1 == "CalibrateY2" ||
       Tempval1 == "CalibrateZ1" || Tempval1 == "CalibrateZ2" ||
       Tempval1 == "HomeButton") {
+    if (loadingParked) {
+      REPORT_ERROR(EC_LOADING_POSITION, "Return first");
+      return;
+    }
     if (machineStarted) {
       REPORT_ERROR(EC_CMD_STARTED, "Stop machine");
       PrintLCD("E508 Started", "Stop machine!");
       return;
     }
+  }
+
+  if (Tempval1.startsWith("Calibrate")) {
+    atHomePosition = false;  // Jogging invalidates calibrated XY/Z pickup origin.
+    loadingReturnReady = false;
   }
 
   if (Tempval1 == "CalibrateX1") {Move4(0,1,(short)manualSteps,0);
@@ -512,11 +596,17 @@ void DetermineAction() {
     response += ",zmax=" + String(Z_ENDSTOP_MAX);
     response += ",zsteps=" + String(zPositionSteps);
     response += ",home=" + String(atHomePosition ? 1 : 0);
+    response += ",parked=" + String(loadingParked ? 1 : 0);
+    response += ",loadready=" + String(loadingReturnReady ? 1 : 0);
     response += ",started=" + String(machineStarted ? 1 : 0);
     response += ">";
     Serial.println(response);
 
   } else if (Tempval1.startsWith("SetMotor,")) {
+    if (loadingParked) {
+      REPORT_ERROR(EC_LOADING_POSITION, "Return first");
+      return;
+    }
     if (machineStarted) {
       REPORT_ERROR(EC_CMD_STARTED, "Stop first");
       return;
@@ -526,6 +616,12 @@ void DetermineAction() {
     int comma2 = Tempval1.indexOf(',', comma1 + 1);
     String motor = Tempval1.substring(comma1 + 1, comma2);
     int state = Tempval1.substring(comma2 + 1).toInt();
+
+    if (motor == "Xenable" || motor == "Yenable" || motor == "Zenable" ||
+        motor == "E0enable" || motor == "E1enable") {
+      atHomePosition = false;   // Motor release can lose physical position.
+      loadingReturnReady = false;
+    }
 
     if (motor == "Xenable") digitalWrite(Xenable, state);
     else if (motor == "Yenable") digitalWrite(Yenable, state);
