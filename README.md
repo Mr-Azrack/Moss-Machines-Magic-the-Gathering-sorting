@@ -64,7 +64,7 @@ The Moss Machine combines perceptual hash-based computer vision, multi-threaded 
   - **34-tray sorting system** with configurable tray assignments
   - **Automatic homing and calibration** with configurable course correction
   - **Overflow tray (34)** and reject bin (33) with automatic routing
-  - **Configurable parameters**: pickup/drop distances, movement speeds, thresholds, calibration multipliers
+  - **Configurable parameters**: pickup travel distance, movement speeds, thresholds, calibration multipliers
   - **Safety features**: endstop monitoring, retry logic (10 attempts), timeout handling
   - **Start/Stop machine states** - prevents accidental movements during parameter changes
 
@@ -200,6 +200,24 @@ The Moss Machine combines perceptual hash-based computer vision, multi-threaded 
    python gui_interface_enhanced.py
    ```
 
+### Card Drop at Full Travel Height (Current Version)
+
+After picking up a card, the sorter **raises Z to the normal full travel
+height (Z=0) before moving in X/Y**. At the destination, it now stops the
+pickup vacuum and uses the existing 100 ms pause, 100 ms driver pulse, and
+2.5 s settle delay **without lowering or re-raising the head**. It then
+returns in X/Y at that same raised height.
+
+The former `initial_drop_distance` Z parameter has been removed. Pickup
+depth and sensing behavior remain unchanged. An unexpected nonzero Z position
+prevents XY travel or release and stops sorting with `E516`.
+
+**Before a loaded run:** Flash the new `Current version/Main/Main.ino` to
+the Mega. First test without cards and verify the head never descends over a
+tray. Then use a few inexpensive cards to verify that releasing from full
+height still lands cards in the intended bins without excessive bounce or
+drift. The software compile cannot prove physical card placement.
+
 ### Loading Cards Safely (Current Version)
 
 The pickup station and normal head home are the same position. **Never force cards
@@ -300,7 +318,7 @@ python optimized_scanner.py card.jpg -t 20 --min-confidence 70
 - `speed`: XY movement speed in microseconds (default: 700)
 - `zspeed`, `zespeed`: Z-axis speeds (75, 120)
 - `initial_pickup_distance`: Z distance to pickup position (6000 steps)
-- `initial_drop_distance`: Z distance to drop position (4000 steps)
+- **Tray release height:** fully raised Z=0 travel position; there is no tray drop descent/return stroke.
 - `pickup_threshold`: Distance threshold for successful pickup (40mm)
 - `release_threshold`: Distance threshold for successful release (40mm)
 - `HCC`: Homing cycle count - rehome every N cards (default: 10)
