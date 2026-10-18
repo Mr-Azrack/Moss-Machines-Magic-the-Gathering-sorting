@@ -2944,21 +2944,39 @@ class ScannerGUI:
             except Exception as _e:
                 scan_image_path = None
 
-            card_info = None
-            # Allow recognition plugin to handle recognition; fallback to built-in scanner
+            # A plugin may supply an OCR/recognition opinion, but it cannot
+            # bypass the built-in pHash + printing-identity safety gate.
+            plugin_info = None
             if getattr(self, 'recognition_plugin', None):
                 try:
-                    card_info = self.recognition_plugin.recognize(frame, card_approx, self.scanner)
+                    plugin_info = self.recognition_plugin.recognize(frame, card_approx, self.scanner)
                 except Exception as e:
                     self.log_status(f"Recognition plugin error: {e}", error=True)
                     self.log_error('E305', str(e))
 
+            card_info = self.scanner._process_card_from_contour(frame, card_approx)
+            reject_reason = getattr(self.scanner, 'last_identification_reject_reason', None)
+            if card_info and plugin_info:
+                if not isinstance(plugin_info, dict):
+                    reject_reason = 'recognition_plugin_invalid_response'
+                    card_info = None
+                else:
+                    # A disagreement means we do not know which product is right.
+                    # Do NOT write inventory/history or command a normal tray.
+                    expected_id = str(card_info.get('product_id') or '')
+                    plugin_id = str(plugin_info.get('product_id') or plugin_info.get('UniqueID') or '')
+                    expected_set = str(card_info.get('set') or '').upper()
+                    plugin_set = str(plugin_info.get('set') or plugin_info.get('set_code') or '').upper()
+                    if not plugin_id or plugin_id != expected_id or (plugin_set and plugin_set != expected_set):
+                        reject_reason = 'recognition_plugin_disagrees'
+                        card_info = None
+
             if not card_info:
-                card_info = self.scanner._process_card_from_contour(frame, card_approx)
-            
-            if not card_info:
-                self.detection_info = {'status': 'error', 'message': 'Not recognized', 'bin': 'RejectCard'}
-                self.log_error('E301')
+                reason = reject_reason or 'Identification inconclusive'
+                self.detection_info = {'status': 'reject', 'message': reason, 'bin': 'RejectCard'}
+                self.log_status(f"⊗ Card sent to reject: {reason}", error=True)
+                if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
+                    self._send_arduino("RejectCard")
                 return
 
             # Attach scan image path + backend to card_info for persistence
