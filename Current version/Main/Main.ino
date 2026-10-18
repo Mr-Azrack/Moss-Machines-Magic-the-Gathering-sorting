@@ -22,6 +22,7 @@
 #define EC_BUF_OVERFLOW       "E513"
 #define EC_UNKNOWN_CMD        "E514"
 #define EC_LOADING_POSITION   "E515"
+#define EC_Z_TRAVEL_HEIGHT     "E516"
 
 #define REPORT_ERROR(code, msg) \
   do { \
@@ -82,7 +83,7 @@ const unsigned short VACUUM_CARRY_PULSE_GAP_MS = 1500;
 const unsigned short VACUUM_CARRY_CYCLE_MS = VACUUM_CARRY_PULSE_ON_MS + VACUUM_CARRY_PULSE_GAP_MS;
 const unsigned short DROP_SETTLE_MS = 2500;
 
-short initial_pickup_distance = 6000, initial_drop_distance = 4000;
+short initial_pickup_distance = 6000;
 short Xcal = 350, Ycal = 475, Zcal = 935;
 short speed = 500, zspeed = 28, zespeed = 36;
 short pickup_threshold = 40, release_threshold = 40;
@@ -261,25 +262,32 @@ boolean delayWithStop(unsigned long waitMs) {
   return true;
 }
 
-boolean pick(long steps, byte Release) {
-  if (Release == 1) {
-    Move1(0, steps, zspeed);
-    if (abortRequested) return false;
-
-    // Drop by stopping the pickup vacuum and allowing the card to settle.
-    // Vacuum2 is intentionally not used in the automatic sort cycle.
-    stopVacuumCarryPulse();
-    if (!delayWithStop(100)) return false;
-
-    MotorsOnOff(1);
-    if (!delayWithStop(100)) return false;
-    MotorsOnOff(0);
-
-    if (!delayWithStop(DROP_SETTLE_MS)) return false;
-    Move1(1, steps, zespeed);
-    return !abortRequested;
+// Release the card over the selected tray at full travel height (Z=0).
+// Pickup already restored Z to 0 BEFORE traveling in X/Y. Never make an
+// extra descent/ascent at the destination; preserve the established vacuum
+// shutoff, short driver pulse, and card-settling timings.
+boolean releaseCardAtTravelHeight() {
+  if (abortRequested || !machineStarted) return false;
+  if (zPositionSteps != 0) {
+    StopMachine(); // Fail closed: XY/Z alignment is not known to be safe.
+    REPORT_ERROR(EC_Z_TRAVEL_HEIGHT, "Z not raised");
+    return false;
   }
 
+  // Vacuum2 remains unused by the automatic sort cycle.
+  stopVacuumCarryPulse();
+  if (!delayWithStop(100)) return false;
+
+  MotorsOnOff(1);
+  // Always restore driver power, even if STOP arrives during the pulse.
+  boolean pulseCompleted = delayWithStop(100);
+  MotorsOnOff(0);
+  if (!pulseCompleted) return false;
+
+  return delayWithStop(DROP_SETTLE_MS);
+}
+
+boolean pick(long steps) {
   PickupRetry = 0;
   while (PickupRetry < MAX_PICKUP_ATTEMPTS) {
     Move1(0, steps, zspeed);
@@ -730,7 +738,7 @@ void Tray(short var) {
   if (remainingSafeSteps < 0) remainingSafeSteps = 0;
   if (pickupSteps > remainingSafeSteps) pickupSteps = remainingSafeSteps;
 
-  if (!pick(pickupSteps, 0)) {
+  if (!pick(pickupSteps)) {
     // A normal pickup failure leaves Z at the initial 6000-step pickup height.
     // Return to home height. An emergency stop, however, stops immediately.
     if (!abortRequested) {
@@ -746,6 +754,12 @@ void Tray(short var) {
   // any X/Y movement. This keeps every carry move at the same known height.
   Move1(1, CARRY_CLEARANCE_STEPS, zespeed);
   if (abortRequested) return;
+  // XY must never travel with the head below the raised Z=0 position.
+  if (zPositionSteps != 0) {
+    StopMachine();
+    REPORT_ERROR(EC_Z_TRAVEL_HEIGHT, "Z before XY");
+    return;
+  }
 
   upcount++;
   CountArray[var]++;
@@ -780,8 +794,8 @@ void Tray(short var) {
   Move4(moveToDirectionX, moveToDirectionY, absX, absY);
   if (abortRequested) return;
 
-  long dropSteps = (long)initial_drop_distance + CARRY_CLEARANCE_STEPS;
-  if (!pick(dropSteps, 1)) return;
+  // Release at the existing raised travel height; no downward drop stroke.
+  if (!releaseCardAtTravelHeight()) return;
   if (abortRequested) return;
 
   int moveBackDirectionX = (x >= 0) ? 0 : 1;
@@ -789,9 +803,8 @@ void Tray(short var) {
   Move4(moveBackDirectionX, moveBackDirectionY, absX, absY);
   if (abortRequested) return;
 
-  // pick(..., Release=1) already returned Z by the full dropSteps, which puts
-  // it back at the pickup-cycle Z=0 travel height. No extra Z correction is
-  // needed before the next card.
+  // Z has remained at full travel height throughout tray release.
+  // No Z correction is required before returning to pickup.
   if (y != 0) { Move4(0, 0, 0, YCourseCorrection); }
   if (x != 0) { Move4(0, 1, XCourseCorrection, 0); }
   if (abortRequested) return;
