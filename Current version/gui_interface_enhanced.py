@@ -313,6 +313,20 @@ class ScannerGUI:
                                   padx=15, pady=8, cursor='hand2', state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
+        # Loading controls always visible beside the camera, so operators
+        # don't need to switch to the Arduino tab between batches.
+        self.camera_load_btn = tk.Button(
+            parent, text="LOAD CARDS  →  PARK HEAD", command=self.park_for_loading,
+            bg='#FF9800', fg='black', font=('Arial', 10, 'bold'),
+            padx=14, pady=6, state=tk.DISABLED, relief=tk.FLAT)
+        self.camera_load_btn.pack(pady=(0, 4))
+        self.camera_return_btn = tk.Button(
+            parent, text="CARDS LOADED  →  RETURN TO PICKUP",
+            command=self.return_from_loading, bg='#03A9F4', fg='white',
+            font=('Arial', 10, 'bold'), padx=14, pady=6,
+            state=tk.DISABLED, relief=tk.FLAT)
+        self.camera_return_btn.pack(pady=(0, 4))
+
         # Compact UI checkbox to reduce fonts/padding and shrink panels
         self.compact_cb = tk.Checkbutton(control_frame, text="Compact UI", variable=self.compact_mode_var,
                          command=self.apply_compact_mode, bg='#1e1e1e', fg='#fff',
@@ -2195,10 +2209,11 @@ class ScannerGUI:
 
     def _apply_loading_sensor_status(self, response):
         """Reconcile UI state with firmware; never infer a successful move."""
-        if not response or not str(response).startswith("Sensors,"):
+        normalized_response = str(response or '').strip().strip('<>')
+        if not normalized_response.startswith("Sensors,"):
             return False
         parts = {}
-        for part in str(response).split(',')[1:]:
+        for part in normalized_response.split(',')[1:]:
             if '=' in part:
                 k, v = part.split('=', 1)
                 parts[k.strip()] = v.strip()
@@ -2368,8 +2383,10 @@ class ScannerGUI:
 
         can_park = manual_allowed and not getattr(self, '_scan_in_progress', False)
         self.load_cards_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
+        self.camera_load_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
         can_return = connected and parked and not (self.machine_started or busy or uncertain)
         self.return_from_loading_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
+        self.camera_return_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
         self.start_machine_btn.configure(
             state=tk.NORMAL if connected and not (self.machine_started or parked or busy or uncertain) else tk.DISABLED)
         self.stop_machine_btn.configure(
@@ -2392,8 +2409,8 @@ class ScannerGUI:
 
     def toggle_motor(self, name):
         """Toggle motor/relay"""
-        if self.machine_started:
-            self.log_status("⚠ Cannot control motors while machine is started", error=True)
+        if self.machine_started or self.machine_parked_for_loading or self._loading_motion_active or self._loading_position_uncertain:
+            self.log_status("⚠ Manual motor changes are disabled during loading/running", error=True)
             self.log_error('E508', f'toggle_motor:{name}')
             # Revert checkbox
             self.motor_vars[name].set(not self.motor_vars[name].get())
