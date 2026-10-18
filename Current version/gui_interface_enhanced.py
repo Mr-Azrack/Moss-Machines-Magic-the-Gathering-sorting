@@ -186,6 +186,7 @@ class ScannerGUI:
         self.loading_return_ready = False
         self._loading_motion_active = False
         self._loading_position_uncertain = False
+        self._arduino_tx_lock = threading.Lock()  # serialize plugin and scanner command/reply pairs
         # Camera canvas size (adjustable to make UI fit on smaller screens)
         self.canvas_width = 600
         self.canvas_height = 540
@@ -2173,6 +2174,7 @@ class ScannerGUI:
                     if not self._sync_loading_status():
                         self._loading_position_uncertain = True
                         self.log_status("Firmware loading state unavailable; update Main.ino first", error=True)
+                        self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
                     self._update_controls_state()
                 else:
                     self.log_error('E403')
@@ -2478,23 +2480,24 @@ class ScannerGUI:
             self.log_error("E509", context or "params sent while not at home")
 
     def _send_arduino(self, cmd):
-        """Route command to Arduino plugin if available, else fallback to scanner serial."""
-        try:
-            if getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected():
-                try:
-                    return self.arduino_plugin.send(cmd)
-                except Exception:
-                    return None
+        """Route commands with one lock, including plugin and monitor traffic."""
+        with self._arduino_tx_lock:
+            try:
+                if getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected():
+                    try:
+                        return self.arduino_plugin.send(cmd)
+                    except Exception:
+                        return None
 
-            if self.scanner and getattr(self.scanner, 'ser', None):
-                try:
-                    return self.scanner.send_to_arduino(cmd)
-                except Exception:
-                    return None
-        except Exception:
+                if self.scanner and getattr(self.scanner, 'ser', None):
+                    try:
+                        return self.scanner.send_to_arduino(cmd)
+                    except Exception:
+                        return None
+            except Exception:
+                return None
             return None
-        return None
-    
+
     def toggle_arduino_monitoring(self):
         """Start/stop Arduino monitoring"""
         if self.monitor_var.get():
