@@ -22,6 +22,8 @@ jobs:
       - name: Compile UI and error-code modules
         run: |
           python -m py_compile "Current version/gui_interface_enhanced.py" "Current version/error_codes.py"
+      - name: Verify loading-state GUI interlocks
+        run: python -m unittest discover -s "Current version/tests" -p "test_loading_park_gui.py" -v
   firmware-compile:
     runs-on: ubuntu-latest
     steps:
