@@ -1461,6 +1461,7 @@ class OptimizedCardScanner:
         Extract and process card from contour
         Returns card info dict or None
         """
+        self.last_identification_reject_reason = "capture_or_processing_failure"
         try:
             # Use the internal perspective correction
             warped = self._get_perspective_corrected_card(frame, card_approx)
