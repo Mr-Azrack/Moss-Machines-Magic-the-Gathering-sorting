@@ -34,7 +34,7 @@ jobs:
       - name: Install firmware libraries
         run: |
           arduino-cli lib install "LiquidCrystal I2C"
-          arduino-cli lib install "Adafruit VL6180X Library"
+          arduino-cli lib install "Adafruit_VL6180X"
           arduino-cli lib install "Stepper"
       - name: Compile Arduino Mega firmware
         run: arduino-cli compile --fqbn arduino:avr:mega "Current version/Main"
