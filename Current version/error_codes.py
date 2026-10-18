@@ -268,6 +268,13 @@ ERROR_CODES: dict[str, dict] = {
         "severity": "warning",
     },
 
+    "E516": {
+        "title": "Z Axis Not at Full Travel Height",
+        "description": "The pickup head did not return to its fully raised Z=0 height before XY movement or card release.",
+        "fix": "Stop sorting. Clear cards, verify Z alignment and pickup homing, then test an empty cycle before resuming.",
+        "severity": "error",
+    },
+
     # ── E6xx — Collection & Export ──────────────────────────────────────────
     "E601": {
         "title": "Collection Manager Not Initialised",
