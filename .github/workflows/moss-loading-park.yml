@@ -1,0 +1,40 @@
+name: MOSS loading park
+
+on:
+  pull_request:
+    paths:
+      - "Current version/Main/Main.ino"
+      - "Current version/gui_interface_enhanced.py"
+      - "Current version/error_codes.py"
+      - ".github/workflows/moss-loading-park.yml"
+  push:
+    branches:
+      - "feature/card-loading-park-*"
+
+jobs:
+  gui-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile UI and error-code modules
+        run: |
+          python -m py_compile "Current version/gui_interface_enhanced.py" "Current version/error_codes.py"
+  firmware-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install Arduino Mega toolchain
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr
+      - name: Install firmware libraries
+        run: |
+          arduino-cli lib install "LiquidCrystal I2C"
+          arduino-cli lib install "Adafruit VL6180X"
+          arduino-cli lib install "Stepper"
+      - name: Compile Arduino Mega firmware
+        run: arduino-cli compile --fqbn arduino:avr:mega "Current version/Main"
