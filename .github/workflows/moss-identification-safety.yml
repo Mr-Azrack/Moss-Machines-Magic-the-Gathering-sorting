@@ -1,0 +1,21 @@
+name: MOSS recognition safety
+on:
+  pull_request:
+  push:
+    branches:
+      - "fix/identification-fail-closed-*"
+
+jobs:
+  identification-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile production scanner and GUI
+        run: |
+          python -m py_compile "Current version/optimized_scanner.py" "Current version/gui_interface_enhanced.py" "Current version/identification_safety.py"
+      - name: Identification decision regression tests
+        run: |
+          python -m unittest discover -s "Current version/tests" -p "test_identification_safety.py" -v
