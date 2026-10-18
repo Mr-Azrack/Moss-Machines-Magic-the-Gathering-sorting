@@ -261,6 +261,13 @@ ERROR_CODES: dict[str, dict] = {
         "severity": "warning",
     },
 
+    "E515": {
+        "title": "Loading Position Interlock",
+        "description": "Park/return rejected: machine must be stopped at a known, raised home or already parked.",
+        "fix": "Press STOP and HOME with an empty loading area; then LOAD CARDS. If parked, use RETURN TO PICKUP. Never force a move after an interrupted motion.",
+        "severity": "warning",
+    },
+
     # ── E6xx — Collection & Export ──────────────────────────────────────────
     "E601": {
         "title": "Collection Manager Not Initialised",

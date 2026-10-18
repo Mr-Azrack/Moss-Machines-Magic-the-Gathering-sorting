@@ -200,6 +200,44 @@ The Moss Machine combines perceptual hash-based computer vision, multi-threaded 
    python gui_interface_enhanced.py
    ```
 
+### Loading Cards Safely (Current Version)
+
+The pickup station and normal head home are the same position. **Never force cards
+under the pickup head.** The updated PC GUI and Arduino sketch implement an
+explicit loading clearance position instead of requiring manual jogging.
+
+1. Connect the Arduino. With an **empty** pickup area, click **HOME** if the
+   machine has not been homed since power-up or was manually jogged.
+2. Press **STOP** if the sorter is running. Wait for the current motion to end.
+3. Click **LOAD CARDS** in the camera view (or Arduino tab). The head moves
+   at fully raised Z to the already supported +3X/+2Y corner of the tray grid.
+4. **Wait for "LOADING POSITION"**, then load the card stack. Keep hands
+   away from the motion path.
+5. Remove hands and click **RETURN TO PICKUP**. It moves the exact inverse
+   XY displacement, without lowering Z or rehoming over the newly loaded cards.
+6. Wait for **READY TO START**, then press **START**. The Arduino skips its
+   ordinary homing descent for this one verified loading return.
+
+Firmware rejects loading moves when running, when its home is unknown, or
+when Z is not fully raised. It rejects START, HOME and calibration while parked.
+The GUI disables normal controls during loading and verifies the firmware's
+`parked`/`loadready` state before enabling START.
+
+**Deployment:** Update the desktop GUI **and flash**
+`Current version/Main/Main.ino` to the Arduino Mega. Updating GitHub or the
+desktop files does **not** automatically flash the machine. The new GUI requires
+the matching firmware status fields.
+
+**Recovery:** If the board resets, USB communication fails during movement,
+or the head position becomes uncertain, **do not press START**. Clear the
+pickup area before manually recovering/home-calibrating the head. Physical
+limit switches do not encode a precise parked XY location across a reset.
+
+**First hardware check:** With no cards and a clear deck, verify HOME →
+LOAD CARDS → RETURN TO PICKUP, then STOP/START, and check that both the
+outbound and inverse travel are inside the machine's actual clearance envelope.
+Only then attempt a loaded batch. Never put hands in the machine while it moves.
+
 ### Arduino Setup
 
 1. **Install Arduino libraries:**

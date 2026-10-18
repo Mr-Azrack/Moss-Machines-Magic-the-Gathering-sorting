@@ -180,8 +180,13 @@ class ScannerGUI:
         # Arduino monitoring
         self.arduino_monitoring = False
         self.arduino_monitor_thread = None
-        self.sensor_data = {'range': 0, 'x_min': 0, 'x_max': 0, 'y_min': 0, 'y_max': 0, 'z_min': 0, 'z_max': 0, 'started': 0}
+        self.sensor_data = {'range': 0, 'x_min': 0, 'x_max': 0, 'y_min': 0, 'y_max': 0, 'z_min': 0, 'z_max': 0, 'started': 0, 'home': 0, 'parked': 0, 'loadready': 0}
         self.machine_started = False  # Track if Arduino is in Started state
+        self.machine_parked_for_loading = False
+        self.loading_return_ready = False
+        self._loading_motion_active = False
+        self._loading_position_uncertain = False
+        self._arduino_tx_lock = threading.Lock()  # serialize plugin and scanner command/reply pairs
         # Camera canvas size (adjustable to make UI fit on smaller screens)
         self.canvas_width = 600
         self.canvas_height = 540
@@ -308,6 +313,20 @@ class ScannerGUI:
                                   bg='#f44336', fg='white', font=('Arial', 11, 'bold'),
                                   padx=15, pady=8, cursor='hand2', state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+
+        # Loading controls always visible beside the camera, so operators
+        # don't need to switch to the Arduino tab between batches.
+        self.camera_load_btn = tk.Button(
+            parent, text="LOAD CARDS  →  PARK HEAD", command=self.park_for_loading,
+            bg='#FF9800', fg='black', font=('Arial', 10, 'bold'),
+            padx=14, pady=6, state=tk.DISABLED, relief=tk.FLAT)
+        self.camera_load_btn.pack(pady=(0, 4))
+        self.camera_return_btn = tk.Button(
+            parent, text="CARDS LOADED  →  RETURN TO PICKUP",
+            command=self.return_from_loading, bg='#03A9F4', fg='white',
+            font=('Arial', 10, 'bold'), padx=14, pady=6,
+            state=tk.DISABLED, relief=tk.FLAT)
+        self.camera_return_btn.pack(pady=(0, 4))
 
         # Compact UI checkbox to reduce fonts/padding and shrink panels
         self.compact_cb = tk.Checkbutton(control_frame, text="Compact UI", variable=self.compact_mode_var,
@@ -607,7 +626,25 @@ class ScannerGUI:
                  bg='#9C27B0', fg='white', font=('Arial', 9, 'bold'),
                  padx=15, pady=5, cursor='hand2', relief=tk.FLAT)
         self.home_btn.pack(side=tk.LEFT, padx=3)
-        
+
+        # Explicit loading workflow: park at a firmware-controlled safe position,
+        # load cards, return by the inverse move, then START.
+        self.load_cards_btn = tk.Button(
+            btn_row, text="LOAD CARDS", command=self.park_for_loading,
+            bg='#FF9800', fg='black', font=('Arial', 9, 'bold'),
+            padx=12, pady=5, cursor='hand2', relief=tk.FLAT, state=tk.DISABLED)
+        self.load_cards_btn.pack(side=tk.LEFT, padx=3)
+        self.return_from_loading_btn = tk.Button(
+            btn_row, text="RETURN TO PICKUP", command=self.return_from_loading,
+            bg='#03A9F4', fg='white', font=('Arial', 9, 'bold'),
+            padx=12, pady=5, cursor='hand2', relief=tk.FLAT, state=tk.DISABLED)
+        self.return_from_loading_btn.pack(side=tk.LEFT, padx=3)
+        self.loading_hint_label = tk.Label(
+            state_frame,
+            text="STOP → LOAD CARDS → place stack → RETURN TO PICKUP → START",
+            bg='#1a1a1a', fg='#ccc', font=('Arial', 8))
+        self.loading_hint_label.pack(pady=(1, 6))
+
         # Sensors & Monitoring - Compact display
         self._section_label(frame, "SENSORS & MONITORING")
         sensor_frame = tk.Frame(frame, bg='#1a1a1a', relief=tk.SUNKEN, bd=1)
@@ -2132,9 +2169,12 @@ class ScannerGUI:
                     except Exception:
                         pass
                     self.machine_started = False
-                    self.machine_state_label.configure(text="● STOPPED", fg='#ff4444')
-                    self.start_machine_btn.configure(state=tk.NORMAL)
-                    self.stop_machine_btn.configure(state=tk.DISABLED)
+                    self.machine_parked_for_loading = False
+                    self.loading_return_ready = False
+                    if not self._sync_loading_status():
+                        self._loading_position_uncertain = True
+                        self.log_status("Firmware loading state unavailable; update Main.ino first", error=True)
+                        self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
                     self._update_controls_state()
                 else:
                     self.log_error('E403')
@@ -2155,85 +2195,224 @@ class ScannerGUI:
 
         threading.Thread(target=_do_connect, daemon=True).start()
 
+    def _arduino_connected(self):
+        """Either the scanner serial port or the optional Arduino plugin may be connected."""
+        if self.scanner and getattr(self.scanner, 'ser', None):
+            try:
+                if self.scanner.ser.is_open:
+                    return True
+            except Exception:
+                return True
+        plugin = getattr(self, 'arduino_plugin', None)
+        try:
+            return bool(plugin and plugin.is_connected())
+        except Exception:
+            return False
+
+    def _apply_loading_sensor_status(self, response):
+        """Reconcile UI state with firmware; never infer a successful move."""
+        normalized_response = str(response or '').strip().strip('<>')
+        if not normalized_response.startswith("Sensors,"):
+            return False
+        parts = {}
+        for part in normalized_response.split(',')[1:]:
+            if '=' in part:
+                k, v = part.split('=', 1)
+                parts[k.strip()] = v.strip()
+        if 'parked' not in parts or 'started' not in parts or 'home' not in parts:
+            return False  # Firmware must support the loading interlock protocol.
+        try:
+            self.machine_started = int(parts['started']) == 1
+            self.machine_parked_for_loading = int(parts['parked']) == 1
+            self.loading_return_ready = int(parts.get('loadready', 0)) == 1
+            self.sensor_data['home'] = int(parts['home'])
+            self.sensor_data['parked'] = int(parts['parked'])
+            self.sensor_data['loadready'] = int(parts.get('loadready', 0))
+            self.sensor_data['started'] = int(parts['started'])
+            self._loading_position_uncertain = False
+        except (TypeError, ValueError):
+            return False
+        self._update_controls_state()
+        return True
+
+    def _sync_loading_status(self):
+        """Fetch firmware-confirmed location after connection or uncertain reply."""
+        if not self._arduino_connected():
+            return False
+        try:
+            result = self._send_arduino("QuerySensors")
+            return self._apply_loading_sensor_status(result)
+        except Exception:
+            return False
+
+    def park_for_loading(self):
+        self._loading_move("ParkForLoading")
+
+    def return_from_loading(self):
+        self._loading_move("ReturnFromLoading")
+
+    def _loading_move(self, command):
+        """Send a state-checked head move off the Tk main thread."""
+        if (self.machine_started or self._loading_motion_active or
+                self._loading_position_uncertain or not self._arduino_connected() or
+                getattr(self, '_scan_in_progress', False)):
+            self.log_status("Stop scanning, connect Arduino, and verify position first", error=True)
+            return
+        if command == "ParkForLoading" and self.machine_parked_for_loading:
+            return
+        if command == "ReturnFromLoading" and not self.machine_parked_for_loading:
+            return
+
+        self._loading_motion_active = True
+        self._update_controls_state()
+        self.log_status("→ " + command + " (keep hands clear while moving)")
+
+        def worker():
+            try:
+                response = self._send_arduino(command)
+            except Exception as exc:
+                response = None
+                self.root.after(0, lambda err=str(exc): self.log_status(err, error=True))
+
+            # Query firmware even after errors, so a lost OK cannot mistakenly
+            # leave START enabled while the head is still parked.
+            sensor_reply = None
+            try:
+                if self._arduino_connected():
+                    sensor_reply = self._send_arduino("QuerySensors")
+            except Exception:
+                pass
+
+            def completed():
+                self._loading_motion_active = False
+                status_ok = self._apply_loading_sensor_status(sensor_reply)
+                command_ok = bool(response and
+                    (("OK,LoadingParked" in response) if command == "ParkForLoading"
+                     else ("OK,LoadingReady" in response)))
+                if not status_ok:
+                    self._loading_position_uncertain = True
+                    self.log_status("Position NOT verified; reconnect before any move", error=True)
+                    try:
+                        self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
+                    except Exception:
+                        pass
+                if command_ok and status_ok:
+                    if command == "ParkForLoading" and self.machine_parked_for_loading:
+                        self.log_status("✓ Head clear. Load cards; then click RETURN TO PICKUP.")
+                    elif command == "ReturnFromLoading" and self.loading_return_ready:
+                        self.log_status("✓ Back at pickup. Clear hands and press START.")
+                    else:
+                        self.log_status("Position response disagrees; check machine", error=True)
+                        self._loading_position_uncertain = True
+                else:
+                    self.log_status("✗ " + command + " rejected: " + str(response), error=True)
+                    if response and str(response).startswith("Error,"):
+                        self._handle_arduino_response(response, command)
+                self._update_controls_state()
+
+            self.root.after(0, completed)
+        threading.Thread(target=worker, daemon=True).start()
+
     def start_machine(self):
-        """Start the machine - disable manual controls"""
-        if not self.scanner or not getattr(self.scanner, 'ser', None):
+        """Start only when the head is back at pickup and not in loading mode."""
+        if not self._arduino_connected():
             self.log_status("Arduino not connected", error=True)
+            return
+        if self.machine_parked_for_loading or self._loading_position_uncertain or self._loading_motion_active:
+            self.log_status("Return head to pickup and verify position before START", error=True)
+            messagebox.showwarning("Load Cards", "Return to pickup before starting.")
             return
 
         response = self._send_arduino("StartMachine")
-        if response and "OK" in response:
+        if response and "OK,MachineStarted" in response:
             self.machine_started = True
-            self.machine_state_label.configure(text="● STARTED", fg='#44ff44')
-            self.start_machine_btn.configure(state=tk.DISABLED)
-            self.stop_machine_btn.configure(state=tk.NORMAL)
+            self.loading_return_ready = False
             self._update_controls_state()
             self.log_status("✓ Machine STARTED - Manual controls disabled")
         else:
-            self.log_status("✗ Failed to start machine", error=True)
-            self.log_error('E406', 'StartMachine no OK')
+            self.log_status("✗ Failed to start machine: " + str(response), error=True)
+            if response: self._handle_arduino_response(response, "StartMachine")
             messagebox.showerror("Error", "Failed to start machine")
 
     def arduino_home(self):
-        """Home the machine (manual control)"""
-        if self.machine_started:
-            self.log_status("⚠ Cannot home while machine is started", error=True)
-            messagebox.showwarning("Machine Started", "Stop the machine first to use Home")
+        """Home only when unloaded and not at the loading park."""
+        if self.machine_started or self._loading_motion_active or self.machine_parked_for_loading:
+            self.log_status("Stop machine and return from loading before Home", error=True)
+            messagebox.showwarning("Machine Position", "Return from loading before using Home.")
             return
-
-        if not self.scanner or not getattr(self.scanner, 'ser', None):
-            self.log_status("Arduino not connected", error=True)
+        if not self._arduino_connected() or self._loading_position_uncertain:
+            self.log_status("Arduino position not verified", error=True)
             return
-
         response = self._send_arduino("HomeButton")
         self.log_status("→ HomeButton")
-        if response:
-            self.log_status(f"← {response}")
+        if response and "OK,MachineHomed" in response:
+            self._sync_loading_status()
+            self.log_status("✓ Homed")
         else:
-            self.log_status("No response from Arduino", error=True)
+            self.log_status("✗ Home not confirmed: " + str(response), error=True)
+            if response: self._handle_arduino_response(response, "HomeButton")
 
-    
     def stop_machine(self):
-        """Stop the machine - enable manual controls"""
-        if not self.scanner or not self.scanner.ser:
+        """Stop sorting so the loading-park command can be used."""
+        if not self._arduino_connected():
             self.log_status("Arduino not connected", error=True)
             return
-        
         response = self._send_arduino("StopMachine")
-        if response and "OK" in response:
+        if response and "OK,MachineStopped" in response:
             self.machine_started = False
-            self.machine_state_label.configure(text="● STOPPED", fg='#ff4444')
-            self.start_machine_btn.configure(state=tk.NORMAL)
-            self.stop_machine_btn.configure(state=tk.DISABLED)
             self._update_controls_state()
-            self.log_status("✓ Machine STOPPED - Manual controls enabled")
+            self.log_status("✓ Machine STOPPED - Load Cards available if homed")
         else:
-            self.log_status("✗ Failed to stop machine", error=True)
-            self.log_error('E406', 'StopMachine no OK')
-            messagebox.showerror("Error", "Failed to stop machine")
-    
+            self.log_status("✗ Failed to stop machine: " + str(response), error=True)
+            if response: self._handle_arduino_response(response, "StopMachine")
+
     def _update_controls_state(self):
-        """Enable/disable controls based on machine state"""
-        # When Started: disable all manual controls
-        # When Stopped: enable all manual controls
-        state = tk.DISABLED if self.machine_started else tk.NORMAL
-        
-        # Disable/enable manual controls
+        """Loading motion is isolated from normal start, home and jogging."""
+        busy = self._loading_motion_active
+        parked = self.machine_parked_for_loading
+        uncertain = self._loading_position_uncertain
+        connected = self._arduino_connected()
+        manual_allowed = connected and not (self.machine_started or parked or busy or uncertain)
+        state = tk.NORMAL if manual_allowed else tk.DISABLED
+
         self.home_btn.configure(state=state)
-        
         for checkbox in self.motor_checkboxes.values():
             checkbox.configure(state=state)
-        
         for button in self.movement_buttons:
             button.configure(state=state)
-        
         self.upload_params_btn.configure(state=state)
         self.fetch_params_btn.configure(state=state)
-    
+
+        can_park = manual_allowed and not getattr(self, '_scan_in_progress', False)
+        self.load_cards_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
+        self.camera_load_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
+        can_return = connected and parked and not (self.machine_started or busy or uncertain)
+        self.return_from_loading_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
+        self.camera_return_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
+        self.start_machine_btn.configure(
+            state=tk.NORMAL if connected and not (self.machine_started or parked or busy or uncertain) else tk.DISABLED)
+        self.stop_machine_btn.configure(
+            state=tk.NORMAL if connected and self.machine_started and not busy else tk.DISABLED)
+
+        if uncertain:
+            label, color, hint = "● POSITION UNKNOWN", '#ff4444', "Do not load/start; reconnect and verify position."
+        elif busy:
+            label, color, hint = "● HEAD MOVING", '#FFA726', "Keep hands clear during movement."
+        elif parked:
+            label, color, hint = "● LOADING POSITION", '#FFA726', "Load cards now, then click RETURN TO PICKUP."
+        elif self.machine_started:
+            label, color, hint = "● STARTED", '#44ff44', "Sorting enabled."
+        elif self.loading_return_ready:
+            label, color, hint = "● READY TO START", '#44ff44', "Clear hands and click START."
+        else:
+            label, color, hint = "● STOPPED", '#ff4444', "STOP → LOAD CARDS → place stack → RETURN TO PICKUP → START"
+        self.machine_state_label.configure(text=label, fg=color)
+        self.loading_hint_label.configure(text=hint)
+
     def toggle_motor(self, name):
         """Toggle motor/relay"""
-        if self.machine_started:
-            self.log_status("⚠ Cannot control motors while machine is started", error=True)
+        if self.machine_started or self.machine_parked_for_loading or self._loading_motion_active or self._loading_position_uncertain:
+            self.log_status("⚠ Manual motor changes are disabled during loading/running", error=True)
             self.log_error('E508', f'toggle_motor:{name}')
             # Revert checkbox
             self.motor_vars[name].set(not self.motor_vars[name].get())
@@ -2261,7 +2440,10 @@ class ScannerGUI:
         # Check if manual control command while machine is started
         # Commands may carry a step suffix e.g. "CalibrateX1,10" — compare base name only
         _cmd_base = cmd.split(',')[0]
-        if self.machine_started and _cmd_base in ["HomeButton", "CalibrateX1", "CalibrateX2", "CalibrateY1", "CalibrateY2"]:
+        if (self.machine_parked_for_loading or self._loading_motion_active or self._loading_position_uncertain):
+            self.log_status("Finish loading movement before using manual controls", error=True)
+            return
+        if self.machine_started and _cmd_base in ["HomeButton", "CalibrateX1", "CalibrateX2", "CalibrateY1", "CalibrateY2", "CalibrateZ1", "CalibrateZ2"]:
             self.log_status("⚠ Cannot send manual commands while machine is started", error=True)
             self.log_error('E508', f'cmd={_cmd_base}')
             messagebox.showwarning("Machine Started", "Stop the machine first to use manual controls")
@@ -2298,23 +2480,24 @@ class ScannerGUI:
             self.log_error("E509", context or "params sent while not at home")
 
     def _send_arduino(self, cmd):
-        """Route command to Arduino plugin if available, else fallback to scanner serial."""
-        try:
-            if getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected():
-                try:
-                    return self.arduino_plugin.send(cmd)
-                except Exception:
-                    return None
+        """Route commands with one lock, including plugin and monitor traffic."""
+        with self._arduino_tx_lock:
+            try:
+                if getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected():
+                    try:
+                        return self.arduino_plugin.send(cmd)
+                    except Exception:
+                        return None
 
-            if self.scanner and getattr(self.scanner, 'ser', None):
-                try:
-                    return self.scanner.send_to_arduino(cmd)
-                except Exception:
-                    return None
-        except Exception:
+                if self.scanner and getattr(self.scanner, 'ser', None):
+                    try:
+                        return self.scanner.send_to_arduino(cmd)
+                    except Exception:
+                        return None
+            except Exception:
+                return None
             return None
-        return None
-    
+
     def toggle_arduino_monitoring(self):
         """Start/stop Arduino monitoring"""
         if self.monitor_var.get():
@@ -2449,8 +2632,9 @@ class ScannerGUI:
                     # Query sensor data from Arduino
                     response = self._send_arduino("QuerySensors")
                     
-                    if response and "Sensors" in response:
-                        # Parse response: <Sensors,range=45,xmin=0,xmax=1,ymin=0,ymax=1,zmin=0,zmax=1,home=1,started=0>
+                    if response and str(response).startswith("Sensors,"):
+                        # Apply firmware-authoritative loading state on the Tk thread.
+                        self.root.after(0, lambda value=response: self._apply_loading_sensor_status(value))
                         parts = response.replace("<", "").replace(">", "").split(",")
                         for part in parts[1:]:  # Skip "Sensors"
                             if "=" in part:
@@ -2921,6 +3105,9 @@ class ScannerGUI:
     
     def _perform_scan(self, frame, card_approx):
         """Scan card"""
+        if self.machine_parked_for_loading or self._loading_motion_active or self._loading_position_uncertain:
+            self.log_status("Sorting is paused for loading; return head to pickup first", error=True)
+            return
         try:
             scan_image_path = None
             try:
