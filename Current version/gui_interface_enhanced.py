@@ -2336,58 +2336,89 @@ class ScannerGUI:
             self.root.after(0, completed)
         threading.Thread(target=worker, daemon=True).start()
 
-    def start_machine(self):
-        """Start only when the head is back at pickup and not in loading mode."""
-        if not self._arduino_connected():
-            self.log_status("Arduino not connected", error=True)
+    def _run_control_motion(self, command, expected):
+        """Keep UI responsive through homing and startup (can take >5 seconds)."""
+        if (not self._firmware_verified or not self._arduino_connected() or
+                self._loading_position_uncertain or self._loading_motion_active):
+            self.log_status("Firmware or machine position not verified", error=True)
             return
-        if self.machine_parked_for_loading or self._loading_position_uncertain or self._loading_motion_active:
-            self.log_status("Return head to pickup and verify position before START", error=True)
-            messagebox.showwarning("Load Cards", "Return to pickup before starting.")
+        if self.machine_parked_for_loading:
+            self.log_status("Return from loading before another movement", error=True)
+            return
+        if command == "StartMachine" and (
+                not self.sensor_data.get('home') or self._loading_recovery_required):
+            self.log_status("Home is required before starting", error=True)
+            return
+        if command == "HomeButton" and self.machine_started:
+            self.log_status("Stop sorting before homing", error=True)
             return
 
-        response = self._send_arduino("StartMachine")
-        if response and "OK,MachineStarted" in response:
-            self.machine_started = True
-            self.loading_return_ready = False
-            self._update_controls_state()
-            self.log_status("✓ Machine STARTED - Manual controls disabled")
-        else:
-            self.log_status("✗ Failed to start machine: " + str(response), error=True)
-            if response: self._handle_arduino_response(response, "StartMachine")
-            messagebox.showerror("Error", "Failed to start machine")
+        # Rehoming can lower Z into the pickup area. Require empty hopper.
+        if command == "HomeButton" and not messagebox.askokcancel(
+                "Clear pickup first",
+                "Remove every card from the pickup hopper and keep hands clear.\n"
+                "The machine will seek its hardware endstops. Continue?"):
+            return
+
+        self._loading_motion_active = True
+        self._update_controls_state()
+        self.log_status("→ " + command)
+
+        def worker():
+            response = self._send_arduino(command)
+            sensors = None
+            if response and expected in str(response):
+                sensors = self._send_arduino("QuerySensors")
+            elif response and str(response).startswith("Error,"):
+                sensors = self._send_arduino("QuerySensors")
+
+            def completed():
+                self._loading_motion_active = False
+                got_position = self._apply_loading_sensor_status(sensors)
+                if response and expected in str(response) and got_position:
+                    self.log_status("✓ " + command + " complete")
+                else:
+                    self._loading_position_uncertain = not got_position
+                    self.log_status("✗ " + command + ": " + str(response), error=True)
+                    if response and str(response).startswith("Error,"):
+                        self._handle_arduino_response(response, command)
+                self._update_controls_state()
+            self.root.after(0, completed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_machine(self):
+        self._run_control_motion("StartMachine", "OK,MachineStarted")
 
     def arduino_home(self):
-        """Home only when unloaded and not at the loading park."""
-        if self.machine_started or self._loading_motion_active or self.machine_parked_for_loading:
-            self.log_status("Stop machine and return from loading before Home", error=True)
-            messagebox.showwarning("Machine Position", "Return from loading before using Home.")
-            return
-        if not self._arduino_connected() or self._loading_position_uncertain:
-            self.log_status("Arduino position not verified", error=True)
-            return
-        response = self._send_arduino("HomeButton")
-        self.log_status("→ HomeButton")
-        if response and "OK,MachineHomed" in response:
-            self._sync_loading_status()
-            self.log_status("✓ Homed")
-        else:
-            self.log_status("✗ Home not confirmed: " + str(response), error=True)
-            if response: self._handle_arduino_response(response, "HomeButton")
+        self._run_control_motion("HomeButton", "OK,MachineHomed")
 
     def stop_machine(self):
-        """Stop sorting so the loading-park command can be used."""
-        if not self._arduino_connected():
-            self.log_status("Arduino not connected", error=True)
+        """Allow STOP even while an otherwise locked park transaction is moving."""
+        if not self._firmware_verified or not self._arduino_connected():
+            self.log_status("Arduino firmware not connected/verified", error=True)
             return
+        if self._loading_motion_active:
+            if self.scanner.emergency_stop():
+                self._loading_position_uncertain = True
+                self.log_status(
+                    "STOP sent during motion. Position is UNKNOWN; empty hopper "
+                    "before recovering.", error=True)
+                self._update_controls_state()
+            else:
+                self.log_status("STOP transmit failed — use hardware stop", error=True)
+            return
+
         response = self._send_arduino("StopMachine")
-        if response and "OK,MachineStopped" in response:
+        if response and "OK,MachineStopped" in str(response):
             self.machine_started = False
+            self._sync_loading_status()
             self._update_controls_state()
-            self.log_status("✓ Machine STOPPED - Load Cards available if homed")
+            self.log_status("✓ Machine STOPPED")
         else:
-            self.log_status("✗ Failed to stop machine: " + str(response), error=True)
-            if response: self._handle_arduino_response(response, "StopMachine")
+            self.log_status("✗ STOP response: " + str(response), error=True)
+            self._loading_position_uncertain = True
+            self._update_controls_state()
 
     def _update_controls_state(self):
         """Never enable motion controls without validated firmware and location."""
@@ -2513,23 +2544,20 @@ class ScannerGUI:
             self.log_error("E509", context or "params sent while not at home")
 
     def _send_arduino(self, cmd):
-        """Route commands with one lock, including plugin and monitor traffic."""
+        """Only the version-verified native serial path may command hardware."""
+        if not self._arduino_connected():
+            return None
+        # Connecting/probing is permitted BEFORE _firmware_verified is set;
+        # but all other commands require the matched firmware.
+        if not self._firmware_verified and cmd not in ("QueryFirmware", "QuerySensors"):
+            return None
         with self._arduino_tx_lock:
             try:
-                if getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected():
-                    try:
-                        return self.arduino_plugin.send(cmd)
-                    except Exception:
-                        return None
-
-                if self.scanner and getattr(self.scanner, 'ser', None):
-                    try:
-                        return self.scanner.send_to_arduino(cmd)
-                    except Exception:
-                        return None
-            except Exception:
+                return self.scanner.send_to_arduino(cmd)
+            except Exception as error:
+                self.root.after(0, lambda detail=str(error):
+                                self.log_status("Arduino serial: " + detail, error=True))
                 return None
-            return None
 
     def toggle_arduino_monitoring(self):
         """Start/stop Arduino monitoring"""
