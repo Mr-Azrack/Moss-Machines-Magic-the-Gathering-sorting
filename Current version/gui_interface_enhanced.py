@@ -2057,9 +2057,8 @@ class ScannerGUI:
     def toggle_auto_scan(self):
         """Toggle auto-scan mode"""
         self.auto_scan = self.auto_scan_var.get()
-        mode_text = "Auto-Scan Mode: ON" if self.auto_scan else "Manual Mode: ON"
-        self.scan_mode_label.config(text=mode_text, fg='#4CAF50' if self.auto_scan else '#2196F3')
-        self.log_status(f"Scan mode: {mode_text}")
+        self._refresh_scan_mode_label()
+        self.log_status(f"Scan mode: {'automatic' if self.auto_scan else 'manual'}")
     
     def toggle_inventory(self):
         """Toggle inventory tracking"""
@@ -2104,7 +2103,7 @@ class ScannerGUI:
                 self.scanner.auto_vector_when_unfiltered = False
                 self.scanner.vector_searcher = None
     
-    FIRMWARE_PROTOCOL = "Firmware,MOSS-ENDSTOP-PARK-3"
+    FIRMWARE_PROTOCOL = "Firmware,MOSS-ENDSTOP-PARK-4"
 
     def connect_arduino(self):
         """Use the tested native serial protocol for all physical movement.
@@ -2284,6 +2283,24 @@ class ScannerGUI:
         self.log_status("→ " + command + " (Z raises to Zmin, then Xmax/Ymin; NO pickup)")
 
         def worker():
+            # Capture the true controller state BEFORE any park movement.
+            # If the head doesn't move, the operator needs to see which
+            # switch/home interlock refused the command, not an unrelated E507.
+            if command == "ParkForLoading":
+                try:
+                    before = str(self._send_arduino("QuerySensors") or "")
+                    fields = dict(
+                        item.split('=', 1) for item in before.split(',')
+                        if '=' in item
+                    )
+                    checks = ', '.join(
+                        f"{key}={fields.get(key, '?')}"
+                        for key in ("home", "started", "zmin", "ymin", "xmax", "recover")
+                    )
+                    self.root.after(0, lambda note=checks: self.log_status("LOAD precheck: " + note))
+                except Exception as error:
+                    self.root.after(0, lambda detail=str(error): self.log_status(
+                        "LOAD precheck unavailable: " + detail, error=True))
             try:
                 response = self._send_arduino(command)
             except Exception as exc:
@@ -2455,7 +2472,7 @@ class ScannerGUI:
         if not self._arduino_connected():
             label, color, hint = "● DISCONNECTED", '#ff4444', "Connect the Arduino before moving."
         elif not self._firmware_verified:
-            label, color, hint = "● WRONG FIRMWARE", '#ff4444', "Flash Main.ino with endstop-park protocol 3."
+            label, color, hint = "● WRONG FIRMWARE", '#ff4444', "Flash Main.ino with endstop-park protocol 4."
         elif uncertain:
             label, color, hint = "● POSITION UNKNOWN", '#ff4444', "Do not move or load until position is verified."
         elif busy:
@@ -2474,6 +2491,7 @@ class ScannerGUI:
             label, color, hint = "● STOPPED / AT PICKUP", '#fff', "LOAD CARDS → Z up + endstops → RETURN TO PICKUP → START"
         self.machine_state_label.configure(text=label, fg=color)
         self.loading_hint_label.configure(text=hint)
+        self._refresh_scan_mode_label()
 
     def toggle_motor(self, name):
         """Toggle motor/relay"""
@@ -2987,6 +3005,37 @@ class ScannerGUI:
         self.stop_btn.configure(state=tk.DISABLED)
         self.log_status("⏸ Camera stopped")
     
+    def _refresh_scan_mode_label(self):
+        """Make STOPPED ≠ 'Auto-Scan ON' visually explicit to operators."""
+        if not hasattr(self, 'scan_mode_label'):
+            return
+        if not self.auto_scan:
+            msg, color = "Manual Scan Mode", '#2196F3'
+        elif self._arduino_connected() and not self._sort_cycle_allowed_for_camera():
+            msg, color = "Auto-Scan: PAUSED (Machine Stopped/Loading)", '#FF9800'
+        elif self._arduino_connected():
+            msg, color = "Auto-Scan: SORTING ACTIVE", '#4CAF50'
+        else:
+            msg, color = "Auto-Scan: OFFLINE RECOGNITION", '#4CAF50'
+        self.scan_mode_label.configure(text=msg, fg=color)
+
+    def _sort_cycle_allowed_for_camera(self):
+        """No automatic scan, inventory write or tray command unless sorting is armed.
+
+        Preserve disconnected/offline image-recognition behavior, but a
+        connected controller is only allowed to sort in STARTED state.
+        """
+        if not self._arduino_connected():
+            return not (self._loading_motion_active or self._loading_position_uncertain)
+        return bool(
+            self._firmware_verified and self.machine_started
+            and not self.machine_parked_for_loading
+            and not self._loading_motion_active
+            and not self._loading_position_uncertain
+            and not self._loading_recovery_required
+            and self.sensor_data.get('home') == 1
+        )
+
     def _video_loop(self):
         """Video processing loop"""
         while self.running:
@@ -3027,7 +3076,9 @@ class ScannerGUI:
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 # Only start a scan if cooldown has passed and no scan in progress.
-                if self.auto_scan and (time.time() - self.last_scan_time) > self.scan_cooldown and not getattr(self, '_scan_in_progress', False):
+                if (self.auto_scan and self._sort_cycle_allowed_for_camera()
+                        and (time.time() - self.last_scan_time) > self.scan_cooldown
+                        and not getattr(self, '_scan_in_progress', False)):
                     # Show immediate UI feedback that scanning will occur
                     try:
                         self.detection_info = {'status': 'scanning', 'message': 'Scanning...'}
@@ -3164,8 +3215,8 @@ class ScannerGUI:
     
     def _perform_scan(self, frame, card_approx):
         """Scan card"""
-        if self.machine_parked_for_loading or self._loading_motion_active or self._loading_position_uncertain:
-            self.log_status("Sorting is paused for loading; return head to pickup first", error=True)
+        if not self._sort_cycle_allowed_for_camera():
+            self.log_status("Scanner paused: machine stopped, parked or unverified", error=True)
             return
         try:
             scan_image_path = None
@@ -3218,10 +3269,13 @@ class ScannerGUI:
                         card_info = None
 
             if not card_info:
+                if not self._sort_cycle_allowed_for_camera():
+                    self.log_status("Discarded rejected recognition: sorter paused")
+                    return
                 reason = reject_reason or 'Identification inconclusive'
                 self.detection_info = {'status': 'reject', 'message': reason, 'bin': 'RejectCard'}
                 self.log_status(f"⊗ Card sent to reject: {reason}", error=True)
-                if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
+                if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
                     self._send_arduino("RejectCard")
                 return
 
@@ -3256,12 +3310,20 @@ class ScannerGUI:
             except Exception:
                 pass
             
+            # After OCR/pHash finishes, recheck that STOP or LOAD hasn't
+            # invalidated this card. check_inventory() has write side effects.
+            if not self._sort_cycle_allowed_for_camera():
+                self.log_status("Discarding stale recognition; sorter paused")
+                return
             if self.scanner.track_inventory:
                 card_info = self.scanner.check_inventory(card_info)
                 if card_info == "RejectCard":
+                    if not self._sort_cycle_allowed_for_camera():
+                        self.log_status("Discarded inventory rejection: sorter paused")
+                        return
                     self.detection_info = {'status': 'reject', 'message': 'In inventory', 'bin': 'RejectCard'}
                     self.log_status("⊗ Already in inventory")
-                    if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
+                    if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
                         self._send_arduino("RejectCard")
                     return
             
@@ -3282,13 +3344,21 @@ class ScannerGUI:
             
             self.log_status(f"✓ {name} ({game}) {confidence:.1f}% → {bin_result}")
             
-            # Add to history
-            self._add_to_history(card_info, bin_result, sorting_mode)
-            
-            if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
+            # Even when an image was recognized, STOP/LOAD may have happened
+            # while computing bins. Never send a tray command in that state.
+            if not self._sort_cycle_allowed_for_camera():
+                self.log_status("Sort cancelled: machine no longer started")
+                return
+
+            if self._arduino_connected():
                 response = self._send_arduino(bin_result)
-                if response:
-                    self._handle_arduino_response(response, bin_result)
+                if not response or str(response).startswith("Error,"):
+                    self.log_status(f"Sort command not accepted: {response}", error=True)
+                    if response:
+                        self._handle_arduino_response(response, bin_result)
+                    return
+            # Successful hardware sort (or offline-only recognition):
+            self._add_to_history(card_info, bin_result, sorting_mode)
         
         except Exception as e:
             self.log_error('E304', str(e))

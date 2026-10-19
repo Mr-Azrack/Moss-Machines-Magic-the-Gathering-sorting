@@ -70,9 +70,9 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertEqual(h.send_to_arduino('ParkForLoading'), 'Error,E517,X timeout')
 
     def test_firmware_probe_requires_specific_identity_frame(self):
-        h = Harness(b'<Arduino is ready><Firmware,MOSS-ENDSTOP-PARK-3>')
+        h = Harness(b'<Arduino is ready><Firmware,MOSS-ENDSTOP-PARK-4>')
         self.assertEqual(h.send_to_arduino('QueryFirmware'),
-                         'Firmware,MOSS-ENDSTOP-PARK-3')
+                         'Firmware,MOSS-ENDSTOP-PARK-4')
 
     def test_emergency_stop_does_not_wait_on_command_lock(self):
         h = Harness()
