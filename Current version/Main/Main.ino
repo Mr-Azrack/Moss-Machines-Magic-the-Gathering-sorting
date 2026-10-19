@@ -23,6 +23,8 @@
 #define EC_UNKNOWN_CMD        "E514"
 #define EC_LOADING_POSITION   "E515"
 #define EC_Z_TRAVEL_HEIGHT     "E516"
+#define EC_LOADING_SEEK_FAIL    "E517"
+#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-3"
 
 #define REPORT_ERROR(code, msg) \
   do { \
@@ -44,8 +46,10 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 boolean newData = false, readInProgress = false, newDataFromPC = false;
 boolean atHomePosition = false;
 boolean machineStarted = false;
-boolean loadingParked = false;           // X/Y at the loading clearance position
-boolean loadingReturnReady = false;      // Returned directly without re-homing into a loaded hopper
+boolean loadingParked = false;           // Xmax/Ymin switches asserted, Z fully raised
+boolean loadingReturnReady = false;      // Returned to calibrated pickup/home
+boolean loadingMotionActive = false;     // STOP responsive during parking
+boolean loadingRecoveryRequired = false; // interrupted move -> empty hopper and HOME
 boolean abortRequested = false;
 boolean vacuumCarryActive = false;
 unsigned long vacuumCarryCycleStart = 0;
@@ -88,10 +92,11 @@ short Xcal = 350, Ycal = 475, Zcal = 935;
 short speed = 500, zspeed = 28, zespeed = 36;
 short pickup_threshold = 40, release_threshold = 40;
 short HCC = 10, YCourseCorrection = 1, XCourseCorrection = 0;
-// Park at the same calibrated +3X/+2Y corner used by normal sorting.
-// This is a known, existing travel envelope, at the fully raised Z=0 height.
-const short LOADING_PARK_X_PITCHES = 3;
-const short LOADING_PARK_Y_PITCHES = 2;
+// Pickup travel home is 3000 Z steps below the Zmin switch.
+const long PICKUP_Z_FROM_LIMIT_STEPS = 3000L;
+const unsigned long LOADING_Z_SEEK_TIMEOUT_MS = 60000UL;
+const unsigned long LOADING_XY_SEEK_TIMEOUT_MS = 15000UL;
+const byte ENDSTOP_TRIGGERED = LOW;
 
 void setup() {
   byte pins[] = { Xstep, Ystep, Zstep, E0step, E1step, Xdir, Ydir, Zdir, E0dir, E1dir, Xenable, Yenable, Zenable, E0enable, E1enable, Vacuum1, Vacuum2, Lights};
@@ -234,13 +239,14 @@ void updateVacuumCarryPulse() {
 
 boolean checkEmergencyStop() {
   if (abortRequested) return true;
-  if (!machineStarted || Serial.available() <= 0) return false;
+  if ((!machineStarted && !loadingMotionActive) || Serial.available() <= 0) return false;
 
   String incoming = Serial.readString();
   incoming.trim();
   if (incoming == "StopMachine") {
     abortRequested = true;
     machineStarted = false;
+    if (loadingMotionActive) loadingRecoveryRequired = true;
     stopVacuumCarryPulse();
     digitalWrite(Vacuum2, LOW);
     Serial.println("<OK,MachineStopped>");
@@ -385,50 +391,112 @@ void Homemachine() {
   zPositionSteps = 0;
   abortRequested = false;
   atHomePosition = true;
+  loadingRecoveryRequired = false;
+  loadingParked = false;
   Serial.println("<OK,MachineHomed>");
 }
 
-// The operator presses LOAD CARDS only while stopped and at known pickup home.
-// Deliberately stay at Z=0 (fully raised); no descent near cards is allowed.
-void ParkForLoading() {
-  if (machineStarted) { REPORT_ERROR(EC_CMD_STARTED, "Stop first"); return; }
-  if (loadingParked) { Serial.println("<OK,LoadingParked>"); return; }
-  if (!atHomePosition || zPositionSteps != 0 || Xcal <= 0 || Ycal <= 0) {
-    REPORT_ERROR(EC_LOADING_POSITION, "Home first");
-    return;
-  }
-  abortRequested = false;
+// Dedicated load-park routine: never call Tray, pick, or any vacuum-on action.
+void loadingSeekFailure(const char* reason) {
+  loadingMotionActive = false;
+  loadingParked = false;
+  loadingReturnReady = false;
+  loadingRecoveryRequired = true;
+  atHomePosition = false;
   stopVacuumCarryPulse();
   digitalWrite(Vacuum2, LOW);
-  atHomePosition = false;
-  loadingReturnReady = false;
-  Move4(1, 0, Xcal * LOADING_PARK_X_PITCHES, Ycal * LOADING_PARK_Y_PITCHES);
-  if (abortRequested) {
-    loadingParked = false;  // Unknown XY; require manual recovery, not inverse motion.
-    REPORT_ERROR(EC_LOADING_POSITION, "Park interrupted");
-    return;
-  }
-  loadingParked = true;
-  Serial.println("<OK,LoadingParked>");
-  PrintLCD("LOAD CARDS", "Head parked");
+  REPORT_ERROR(EC_LOADING_SEEK_FAIL, reason);
+  PrintLCD("LOAD FAILED", reason);
 }
 
-// Move back by the *exact inverse* of the park move. Do not run a homing
-// sequence over the freshly loaded stack. START then skips its usual home once.
-void ReturnFromLoading() {
-  if (machineStarted) { REPORT_ERROR(EC_CMD_STARTED, "Stop first"); return; }
-  if (!loadingParked || zPositionSteps != 0) {
-    REPORT_ERROR(EC_LOADING_POSITION, "Not parked");
-    return;
+void ParkForLoading() {
+  if (machineStarted || loadingMotionActive) {
+    REPORT_ERROR(EC_CMD_STARTED, "Stop first"); return;
+  }
+  if (loadingParked) { Serial.println("<OK,LoadingParked>"); return; }
+  if (loadingRecoveryRequired || !atHomePosition || zPositionSteps != 0) {
+    REPORT_ERROR(EC_LOADING_POSITION, "Empty hopper/Home"); return;
   }
   abortRequested = false;
-  Move4(0, 1, Xcal * LOADING_PARK_X_PITCHES, Ycal * LOADING_PARK_Y_PITCHES);
-  if (abortRequested) {
-    loadingParked = false;  // Unknown XY; do not assume a valid home.
-    atHomePosition = false;
-    REPORT_ERROR(EC_LOADING_POSITION, "Return interrupted");
-    return;
+  loadingMotionActive = true;
+  stopVacuumCarryPulse();
+  digitalWrite(Vacuum2, LOW);
+  MotorsOnOff(0);
+  atHomePosition = false;
+  loadingReturnReady = false;
+
+  // Raise to the physical Zmin stop. Normal Z=0 travel height is below it.
+  unsigned long zStart = millis();
+  while (digitalRead(Zmin) != ENDSTOP_TRIGGERED) {
+    Move1(1, 3, zespeed);  // Z UP ONLY
+    if (abortRequested) { loadingSeekFailure("Z interrupted"); return; }
+    if (millis() - zStart > LOADING_Z_SEEK_TIMEOUT_MS) {
+      loadingSeekFailure("Z timeout"); return;
+    }
   }
+  zPositionSteps = -PICKUP_Z_FROM_LIMIT_STEPS;
+
+  // Same seek directions used by Homemachine(), but no backoff, Z descent,
+  // pickup, tray selection, vacuum action, or return move during parking.
+  unsigned long yStart = millis();
+  while (digitalRead(Ymin) != ENDSTOP_TRIGGERED) {
+    Move4(0, 1, 0, 5);
+    if (abortRequested) { loadingSeekFailure("Y interrupted"); return; }
+    if (millis() - yStart > LOADING_XY_SEEK_TIMEOUT_MS) {
+      loadingSeekFailure("Y timeout"); return;
+    }
+  }
+  unsigned long xStart = millis();
+  while (digitalRead(Xmax) != ENDSTOP_TRIGGERED) {
+    Move4(0, 1, 3, 0);
+    if (abortRequested) { loadingSeekFailure("X interrupted"); return; }
+    if (millis() - xStart > LOADING_XY_SEEK_TIMEOUT_MS) {
+      loadingSeekFailure("X timeout"); return;
+    }
+  }
+
+  ReadEndstops();
+  if (Z_ENDSTOP_MIN != ENDSTOP_TRIGGERED ||
+      X_ENDSTOP_MAX != ENDSTOP_TRIGGERED ||
+      Y_ENDSTOP_MIN != ENDSTOP_TRIGGERED) {
+    loadingSeekFailure("Limits not set"); return;
+  }
+
+  loadingMotionActive = false;
+  loadingParked = true;
+  Serial.println("<OK,LoadingParked>");
+  PrintLCD("LOAD CARDS", "XY limits/Z up");
+}
+
+void ReturnFromLoading() {
+  if (machineStarted || loadingMotionActive) {
+    REPORT_ERROR(EC_CMD_STARTED, "Stop first"); return;
+  }
+  if (loadingRecoveryRequired || !loadingParked) {
+    REPORT_ERROR(EC_LOADING_POSITION, "Not parked"); return;
+  }
+  ReadEndstops();
+  if (Z_ENDSTOP_MIN != ENDSTOP_TRIGGERED ||
+      X_ENDSTOP_MAX != ENDSTOP_TRIGGERED ||
+      Y_ENDSTOP_MIN != ENDSTOP_TRIGGERED) {
+    loadingSeekFailure("Park lost"); return;
+  }
+
+  abortRequested = false;
+  loadingMotionActive = true;
+  stopVacuumCarryPulse();
+  digitalWrite(Vacuum2, LOW);
+  MotorsOnOff(0);
+
+  // From physical Xmax/Ymin, use precisely the offset of Homemachine().
+  // Move in XY at full Z clearance; lower to pickup travel height last.
+  Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38);
+  if (abortRequested) { loadingSeekFailure("XY interrupted"); return; }
+  Move1(0, PICKUP_Z_FROM_LIMIT_STEPS, zspeed);
+  if (abortRequested || zPositionSteps != 0) {
+    loadingSeekFailure("Z return fail"); return;
+  }
+  loadingMotionActive = false;
   loadingParked = false;
   atHomePosition = true;
   loadingReturnReady = true;
@@ -492,9 +560,8 @@ void DetermineAction() {
       }
     }
 
-    atHomePosition = false;
-    ForLoop(1, 34);
-    if (!abortRequested) atHomePosition = true;
+    // An unrecognized Sort command must never fall back to a pickup.
+    REPORT_ERROR(EC_UNKNOWN_CMD, "Unknown sort");
     return;
   }
 
@@ -513,6 +580,10 @@ void DetermineAction() {
     }
   }
 
+  if (Tempval1 == "QueryFirmware") {
+    Serial.println("<Firmware," + String(FIRMWARE_ID) + ">");
+    return;
+  }
   if (Tempval1 == "ParkForLoading") {
     ParkForLoading();
     return;
@@ -522,8 +593,8 @@ void DetermineAction() {
   }
 
   if (Tempval1 == "StartMachine") {
-    if (loadingParked) {
-      REPORT_ERROR(EC_LOADING_POSITION, "Return first");
+    if (loadingParked || loadingMotionActive || loadingRecoveryRequired) {
+      REPORT_ERROR(EC_LOADING_POSITION, "Return/Home first");
       return;
     }
     abortRequested = false;
@@ -567,7 +638,7 @@ void DetermineAction() {
       Tempval1 == "CalibrateY1" || Tempval1 == "CalibrateY2" ||
       Tempval1 == "CalibrateZ1" || Tempval1 == "CalibrateZ2" ||
       Tempval1 == "HomeButton") {
-    if (loadingParked) {
+    if (loadingParked || loadingMotionActive) {
       REPORT_ERROR(EC_LOADING_POSITION, "Return first");
       return;
     }
@@ -606,12 +677,14 @@ void DetermineAction() {
     response += ",home=" + String(atHomePosition ? 1 : 0);
     response += ",parked=" + String(loadingParked ? 1 : 0);
     response += ",loadready=" + String(loadingReturnReady ? 1 : 0);
+    response += ",parkmode=endstops3";
+    response += ",recover=" + String(loadingRecoveryRequired ? 1 : 0);
     response += ",started=" + String(machineStarted ? 1 : 0);
     response += ">";
     Serial.println(response);
 
   } else if (Tempval1.startsWith("SetMotor,")) {
-    if (loadingParked) {
+    if (loadingParked || loadingMotionActive) {
       REPORT_ERROR(EC_LOADING_POSITION, "Return first");
       return;
     }
@@ -823,7 +896,7 @@ void Move4(boolean dir1, boolean dir3, short steps1, short steps2) {
   for (short i = 0; (i < steps1 || i < steps2); i++) {
     if (abortRequested) break;
     if ((i % 10) == 0) updateVacuumCarryPulse();
-    if (machineStarted && (i % 25 == 0) && checkEmergencyStop()) break;
+    if ((machineStarted || loadingMotionActive) && (i % 25 == 0) && checkEmergencyStop()) break;
 
     if (i < steps1) {
       digitalWrite(Xstep, HIGH);
@@ -881,7 +954,7 @@ void Move1(boolean dir, long steps, short speed1) {
   for (long i = 0; i < steps; i++) {
     if (abortRequested) break;
     if ((i % 100L) == 0) updateVacuumCarryPulse();
-    if (machineStarted && (i % 200L == 0) && checkEmergencyStop()) break;
+    if ((machineStarted || loadingMotionActive) && (i % 200L == 0) && checkEmergencyStop()) break;
 
     digitalWrite(Zstep, HIGH);
     delayMicroseconds(speed1);
