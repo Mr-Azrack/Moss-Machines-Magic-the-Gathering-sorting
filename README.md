@@ -264,8 +264,11 @@ performs pickup, tray sorting, vacuum activation, or a Z descent.
    existing homing offsets (`Xcal*3+55`, `Ycal*2+38`) to move back to
    pickup. Only after the XY return does Z lower the established 3000 steps
    from Zmin to the normal raised travel/pickup height. Wait for READY.
-6. Press **START**. When the return is verified the firmware does not
-   repeat the full homing cycle over a loaded stack.
+6. Press **START**. START **never homes or moves any axis**. It only
+   arms sorting when the Arduino already reports the calibrated pickup/home
+   position, Z at its raised travel height (Z=0), and no loading/recovery
+   fault. If those checks fail it rejects START and requires a deliberate
+   HOME (with the hopper EMPTY) or RETURN TO PICKUP.
 
 **Connection behavior:** Serial reads now wait for the acknowledgement
 matching the command. A startup `<Arduino is ready>` frame is not a
