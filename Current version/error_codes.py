@@ -275,6 +275,13 @@ ERROR_CODES: dict[str, dict] = {
         "severity": "error",
     },
 
+    "E517": {
+        "title": "Endstop Park or Home Movement Failed",
+        "description": "The sorter could not confirm Zmin, Xmax, and Ymin, or the endstop movement was interrupted. Physical location is untrusted.",
+        "fix": "Do not load or sort. Stop the machine, remove cards, check all endstop wiring and the mechanical travel path, then home with an empty hopper.",
+        "severity": "error",
+    },
+
     # ── E6xx — Collection & Export ──────────────────────────────────────────
     "E601": {
         "title": "Collection Manager Not Initialised",
