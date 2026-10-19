@@ -47,7 +47,7 @@ class Harness:
     recv_from_arduino = namespace['recv_from_arduino']
     emergency_stop = namespace['emergency_stop']
 
-    def __init__(self, response):
+    def __init__(self, response=b''):
         self.ser = FakeSerial(response)
         self.start_marker = 60
         self.end_marker = 62
