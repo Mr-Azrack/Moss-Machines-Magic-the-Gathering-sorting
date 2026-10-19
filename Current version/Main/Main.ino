@@ -335,11 +335,24 @@ boolean pick(long steps) {
   return false;
 }
 
-void Homemachine() {
-  abortRequested = false;  // A deliberate HomeButton may follow StopMachine.
+void homingFailure(const char* reason, const char* code) {
+  loadingMotionActive = false;
+  loadingParked = false;
   loadingReturnReady = false;
-  PrintLCD("Calibrating", " ");
+  loadingRecoveryRequired = true;
   atHomePosition = false;
+  stopVacuumCarryPulse();
+  digitalWrite(Vacuum2, LOW);
+  REPORT_ERROR(code, reason);
+  PrintLCD("HOME FAILED", reason);
+}
+
+void Homemachine() {
+  abortRequested = false;  // A deliberate HomeButton can follow StopMachine.
+  loadingMotionActive = true;
+  loadingReturnReady = false;
+  atHomePosition = false;
+  PrintLCD("Calibrating", " ");
   ReadEndstops();
 
   if (Z_ENDSTOP_MIN == 1) {
@@ -347,10 +360,9 @@ void Homemachine() {
     while (Z_ENDSTOP_MIN == 1) {
       Move1(1, 3, zespeed);
       Z_ENDSTOP_MIN = digitalRead(Zmin);
+      if (abortRequested) { homingFailure("Z interrupted", EC_LOADING_SEEK_FAIL); return; }
       if (millis() - t0 > 60000UL) {
-        REPORT_ERROR(EC_HOME_Z_FAIL, "Z endstop");
-        PrintLCD("E512 Z home", "Motion aborted");
-        return;
+        homingFailure("Z endstop", EC_HOME_Z_FAIL); return;
       }
     }
     delay(200);
@@ -358,13 +370,14 @@ void Homemachine() {
 
   if (Y_ENDSTOP_MIN == 1) {
     Move4(1, 0, 0, 50);
+    if (abortRequested) { homingFailure("Y interrupted", EC_LOADING_SEEK_FAIL); return; }
     unsigned long t1 = millis();
     while (Y_ENDSTOP_MIN == 1) {
       Move4(0, 1, 0, 5);
       Y_ENDSTOP_MIN = digitalRead(Ymin);
-      if (millis() - t1 > 10000) {
-        REPORT_ERROR(EC_HOME_Y_FAIL, "Y endstop");
-        return;
+      if (abortRequested) { homingFailure("Y interrupted", EC_LOADING_SEEK_FAIL); return; }
+      if (millis() - t1 > 10000UL) {
+        homingFailure("Y endstop", EC_HOME_Y_FAIL); return;
       }
     }
     delay(200);
@@ -372,23 +385,27 @@ void Homemachine() {
 
   if (X_ENDSTOP_MAX == 1) {
     Move4(1, 0, 50, 0);
+    if (abortRequested) { homingFailure("X interrupted", EC_LOADING_SEEK_FAIL); return; }
     unsigned long t2 = millis();
     while (X_ENDSTOP_MAX == 1) {
       Move4(0, 1, 3, 0);
       X_ENDSTOP_MAX = digitalRead(Xmax);
-      if (millis() - t2 > 10000) {
-        REPORT_ERROR(EC_HOME_X_FAIL, "X endstop");
-        return;
+      if (abortRequested) { homingFailure("X interrupted", EC_LOADING_SEEK_FAIL); return; }
+      if (millis() - t2 > 10000UL) {
+        homingFailure("X endstop", EC_HOME_X_FAIL); return;
       }
     }
     delay(200);
   }
 
-  Move1(0, 3000, zspeed);
+  Move1(0, PICKUP_Z_FROM_LIMIT_STEPS, zspeed);
+  if (abortRequested) { homingFailure("Z interrupted", EC_LOADING_SEEK_FAIL); return; }
   delay(200);
   Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38);
+  if (abortRequested) { homingFailure("XY interrupted", EC_LOADING_SEEK_FAIL); return; }
   delay(200);
   zPositionSteps = 0;
+  loadingMotionActive = false;
   abortRequested = false;
   atHomePosition = true;
   loadingRecoveryRequired = false;
