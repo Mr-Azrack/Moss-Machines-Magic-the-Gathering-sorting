@@ -2394,31 +2394,33 @@ class ScannerGUI:
         self._run_control_motion("HomeButton", "OK,MachineHomed")
 
     def stop_machine(self):
-        """Allow STOP even while an otherwise locked park transaction is moving."""
+        """Send STOP immediately even when a sorting/parking transaction is busy."""
         if not self._firmware_verified or not self._arduino_connected():
             self.log_status("Arduino firmware not connected/verified", error=True)
             return
-        if self._loading_motion_active:
-            if self.scanner.emergency_stop():
-                self._loading_position_uncertain = True
-                self.log_status(
-                    "STOP sent during motion. Position is UNKNOWN; empty hopper "
-                    "before recovering.", error=True)
-                self._update_controls_state()
-            else:
-                self.log_status("STOP transmit failed — use hardware stop", error=True)
+        if not self.scanner.emergency_stop():
+            self.log_status("STOP transmit failed — use the hardware stop", error=True)
             return
 
-        response = self._send_arduino("StopMachine")
-        if response and "OK,MachineStopped" in str(response):
-            self.machine_started = False
-            self._sync_loading_status()
-            self._update_controls_state()
-            self.log_status("✓ Machine STOPPED")
-        else:
-            self.log_status("✗ STOP response: " + str(response), error=True)
+        # Do not wait on the serial transaction lock in the Tk GUI thread.
+        # Mid-stroke position must be treated as unsafe until rechecked.
+        self._loading_position_uncertain = True
+        self.log_status("STOP sent. Verify position; empty hopper before recovery.", error=True)
+        self._update_controls_state()
+
+        def reconcile():
+            # Existing in-flight read must finish before the status query.
+            # The firmware polls STOP during homing, sorting and parking.
+            response = self._send_arduino("QuerySensors")
+            self.root.after(0, lambda value=response: self._stop_status_ready(value))
+
+        threading.Thread(target=reconcile, daemon=True).start()
+
+    def _stop_status_ready(self, response):
+        if not self._apply_loading_sensor_status(response):
             self._loading_position_uncertain = True
-            self._update_controls_state()
+            self.log_status("STOP acknowledged by serial write, but position status is unknown", error=True)
+        self._update_controls_state()
 
     def _update_controls_state(self):
         """Never enable motion controls without validated firmware and location."""
