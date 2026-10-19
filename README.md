@@ -218,9 +218,28 @@ tray. Then use a few inexpensive cards to verify that releasing from full
 height still lands cards in the intended bins without excessive bounce or
 drift. The software compile cannot prove physical card placement.
 
+### Why LOAD CARDS showed E507 with no motor movement
+
+In the 6-second October 18 operator video, the GUI displayed **Auto-Scan
+Mode: ON** and logged `E507 Tray command rejected: machine stopped`.
+That message is from an automatic **sorting** command sent while the Arduino
+was stopped; it is NOT an acknowledgement of `ParkForLoading`.
+
+Auto-Scan now pauses when the connected machine is STOPPED, PARKED,
+unverified, or in a loading movement. It cannot send a stale normal tray
+(or rejection) command during loading. The camera status explicitly says
+**Auto-Scan: PAUSED** while stopped. LOAD displays a separate preflight
+line with `home`, `started`, `zmin`, `ymin` and `xmax`, then logs
+its actual Arduino response.
+
+Endstop inputs now use `INPUT_PULLUP` because the endstops are active LOW.
+Previously floating inputs could falsely read as pressed and cause no-motion
+parks. Firmware also rejects a switch that reports pressed at the normal
+pickup coordinate, and bounds how far each axis seeks an endstop.
+
 ### Loading Cards Safely — Real Endstop Parking (October 18, 2026)
 
-**Use the GUI and firmware from the same latest commit.** Earlier
+**Use the GUI and firmware from the same latest commit (firmware protocol 4).** Earlier
 `ParkForLoading` firmware parked at an arbitrary tray-grid position and did not
 verify endstops. It is not compatible with the revised GUI.
 
