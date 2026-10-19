@@ -2987,6 +2987,23 @@ class ScannerGUI:
         self.stop_btn.configure(state=tk.DISABLED)
         self.log_status("⏸ Camera stopped")
     
+    def _sort_cycle_allowed_for_camera(self):
+        """No automatic scan, inventory write or tray command unless sorting is armed.
+
+        Preserve disconnected/offline image-recognition behavior, but a
+        connected controller is only allowed to sort in STARTED state.
+        """
+        if not self._arduino_connected():
+            return not (self._loading_motion_active or self._loading_position_uncertain)
+        return bool(
+            self._firmware_verified and self.machine_started
+            and not self.machine_parked_for_loading
+            and not self._loading_motion_active
+            and not self._loading_position_uncertain
+            and not self._loading_recovery_required
+            and self.sensor_data.get('home') == 1
+        )
+
     def _video_loop(self):
         """Video processing loop"""
         while self.running:
@@ -3027,7 +3044,9 @@ class ScannerGUI:
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 # Only start a scan if cooldown has passed and no scan in progress.
-                if self.auto_scan and (time.time() - self.last_scan_time) > self.scan_cooldown and not getattr(self, '_scan_in_progress', False):
+                if (self.auto_scan and self._sort_cycle_allowed_for_camera()
+                        and (time.time() - self.last_scan_time) > self.scan_cooldown
+                        and not getattr(self, '_scan_in_progress', False)):
                     # Show immediate UI feedback that scanning will occur
                     try:
                         self.detection_info = {'status': 'scanning', 'message': 'Scanning...'}
@@ -3164,8 +3183,8 @@ class ScannerGUI:
     
     def _perform_scan(self, frame, card_approx):
         """Scan card"""
-        if self.machine_parked_for_loading or self._loading_motion_active or self._loading_position_uncertain:
-            self.log_status("Sorting is paused for loading; return head to pickup first", error=True)
+        if not self._sort_cycle_allowed_for_camera():
+            self.log_status("Scanner paused: machine stopped, parked or unverified", error=True)
             return
         try:
             scan_image_path = None
@@ -3256,6 +3275,11 @@ class ScannerGUI:
             except Exception:
                 pass
             
+            # After OCR/pHash finishes, recheck that STOP or LOAD hasn't
+            # invalidated this card. check_inventory() has write side effects.
+            if not self._sort_cycle_allowed_for_camera():
+                self.log_status("Discarding stale recognition; sorter paused")
+                return
             if self.scanner.track_inventory:
                 card_info = self.scanner.check_inventory(card_info)
                 if card_info == "RejectCard":
@@ -3282,13 +3306,21 @@ class ScannerGUI:
             
             self.log_status(f"✓ {name} ({game}) {confidence:.1f}% → {bin_result}")
             
-            # Add to history
-            self._add_to_history(card_info, bin_result, sorting_mode)
-            
-            if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
+            # Even when an image was recognized, STOP/LOAD may have happened
+            # while computing bins. Never send a tray command in that state.
+            if not self._sort_cycle_allowed_for_camera():
+                self.log_status("Sort cancelled: machine no longer started")
+                return
+
+            if self._arduino_connected():
                 response = self._send_arduino(bin_result)
-                if response:
-                    self._handle_arduino_response(response, bin_result)
+                if not response or str(response).startswith("Error,"):
+                    self.log_status(f"Sort command not accepted: {response}", error=True)
+                    if response:
+                        self._handle_arduino_response(response, bin_result)
+                    return
+            # Successful hardware sort (or offline-only recognition):
+            self._add_to_history(card_info, bin_result, sorting_mode)
         
         except Exception as e:
             self.log_error('E304', str(e))
