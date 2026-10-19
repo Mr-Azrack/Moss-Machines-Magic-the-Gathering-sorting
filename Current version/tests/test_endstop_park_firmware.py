@@ -51,7 +51,7 @@ class EndstopParkingSafety(unittest.TestCase):
         self.assertNotIn('Vacuum1, HIGH', body)
 
     def test_firmware_version_lets_gui_block_previous_firmware(self):
-        self.assertIn('#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-3"', source)
+        self.assertIn('#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-4"', source)
         self.assertIn('if (Tempval1 == "QueryFirmware")', source)
         self.assertIn('response += ",parkmode=endstops3"', source)
         self.assertIn('response += ",recover="', source)
