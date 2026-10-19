@@ -2103,7 +2103,7 @@ class ScannerGUI:
                 self.scanner.auto_vector_when_unfiltered = False
                 self.scanner.vector_searcher = None
     
-    FIRMWARE_PROTOCOL = "Firmware,MOSS-ENDSTOP-PARK-3"
+    FIRMWARE_PROTOCOL = "Firmware,MOSS-ENDSTOP-PARK-4"
 
     def connect_arduino(self):
         """Use the tested native serial protocol for all physical movement.
