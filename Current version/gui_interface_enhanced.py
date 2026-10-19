@@ -2688,52 +2688,48 @@ class ScannerGUI:
             self.log_status(f"✗ Fetch error: {e}", error=True)
             self.log_error('E405', str(e))
     def _arduino_monitor_loop(self):
-        """Monitor Arduino sensors"""
+        """Poll sensors only when idle; route ALL Tk changes to the UI thread."""
         while self.arduino_monitoring:
-            if self.scanner and self.scanner.ser:
+            if (self._arduino_connected() and self._firmware_verified and
+                    not self._loading_motion_active and not self._loading_position_uncertain):
                 try:
-                    # Query sensor data from Arduino
                     response = self._send_arduino("QuerySensors")
-                    
                     if response and str(response).startswith("Sensors,"):
-                        # Apply firmware-authoritative loading state on the Tk thread.
-                        self.root.after(0, lambda value=response: self._apply_loading_sensor_status(value))
-                        parts = response.replace("<", "").replace(">", "").split(",")
-                        for part in parts[1:]:  # Skip "Sensors"
-                            if "=" in part:
-                                key, value = part.split("=")
-                                if key == "range":
-                                    self.sensor_data['range'] = int(value)
-                                    self.range_label.configure(text=f"Range Sensor: {value} mm")
-                                elif key == "started":
-                                    # Update machine state from Arduino
-                                    started_state = int(value) == 1
-                                    if started_state != self.machine_started:
-                                        self.machine_started = started_state
-                                        if started_state:
-                                            self.machine_state_label.configure(text="● STARTED", fg='#44ff44')
-                                            self.start_machine_btn.configure(state=tk.DISABLED)
-                                            self.stop_machine_btn.configure(state=tk.NORMAL)
-                                        else:
-                                            self.machine_state_label.configure(text="● STOPPED", fg='#ff4444')
-                                            self.start_machine_btn.configure(state=tk.NORMAL)
-                                            self.stop_machine_btn.configure(state=tk.DISABLED)
-                                        self._update_controls_state()
-                                elif key in self.sensor_data:
-                                    val = int(value)
-                                    self.sensor_data[key] = val
-                                    if key in self.endstop_labels:
-                                        label = self.endstop_labels[key]
-                                        status = "●" if val == 1 else "○"
-                                        color = "#00ff00" if val == 1 else "#888888"
-                                        name = key.replace("_", "-").upper()
-                                        label.configure(text=f"{name}: {status}", fg=color)
-                except Exception as e:
-                    self.log_status(f"Monitor error: {e}", error=True)
-                    self.log_error('E405', f'monitor_loop:{e}')
-            
+                        self.root.after(0, lambda reply=response: self._show_sensor_status(reply))
+                except Exception as error:
+                    self.root.after(0, lambda detail=str(error):
+                                    self.log_status("Monitor: " + detail, error=True))
             time.sleep(0.5)
-    
+
+    def _show_sensor_status(self, response):
+        """Firmware state and sensor widgets must update atomically on Tk."""
+        if not self._apply_loading_sensor_status(response):
+            self._loading_position_uncertain = True
+            self._update_controls_state()
+            return
+        parts = {}
+        for part in str(response).strip().strip('<>').split(',')[1:]:
+            if '=' in part:
+                key, val = part.split('=', 1)
+                parts[key.strip()] = val.strip()
+        try:
+            if 'range' in parts:
+                distance = int(parts['range'])
+                self.sensor_data['range'] = distance
+                self.range_label.configure(text=f"Range Sensor: {distance} mm")
+            for key, label in self.endstop_labels.items():
+                lookup_key = key.replace("_", "")  # x_min -> xmin
+                if lookup_key not in parts:
+                    continue
+                val = int(parts[lookup_key])
+                self.sensor_data[key] = val
+                # Hardware signals are active LOW: 0 means switch engaged.
+                label.configure(
+                    text=f"{key.upper()}: {'●' if val == 0 else '○'}",
+                    fg='#00ff00' if val == 0 else '#888888')
+        except (ValueError, TypeError):
+            pass
+
     # Old CSV export methods removed - now using collection manager
     
     def _add_to_history(self, card_info, bin_result, sorting_mode):
