@@ -186,6 +186,8 @@ class ScannerGUI:
         self.loading_return_ready = False
         self._loading_motion_active = False
         self._loading_position_uncertain = False
+        self._firmware_verified = False
+        self._loading_recovery_required = False
         self._arduino_tx_lock = threading.Lock()  # serialize plugin and scanner command/reply pairs
         # Camera canvas size (adjustable to make UI fit on smaller screens)
         self.canvas_width = 600
@@ -2102,112 +2104,100 @@ class ScannerGUI:
                 self.scanner.auto_vector_when_unfiltered = False
                 self.scanner.vector_searcher = None
     
+    FIRMWARE_PROTOCOL = "Firmware,MOSS-ENDSTOP-PARK-3"
+
     def connect_arduino(self):
-        """Connect to Arduino"""
+        """Use the tested native serial protocol for all physical movement.
+
+        A generic Arduino plugin may connect yet lack correct command parsing,
+        or return its own readiness message. It must never send motor commands
+        until the exact firmware protocol has been established.
+        """
         if not self.scanner:
             self.log_status("Scanner not initialized", error=True)
             return
-
         port = (self.serial_port_var.get() if hasattr(self, 'serial_port_var') else '').strip()
         baud_raw = (self.baud_var.get() if hasattr(self, 'baud_var') else '').strip()
-
         if not port:
-            self.log_status("Please enter a serial port (e.g., COM3)", error=True)
-            messagebox.showwarning("Arduino", "Please enter a serial port (e.g., COM3)")
+            self.log_status("Enter the Arduino COM port", error=True)
+            messagebox.showwarning("Arduino", "Enter the Arduino COM port.")
             return
-
         try:
             baud = int(baud_raw or '9600')
         except Exception:
             baud = 9600
 
-        # Close any existing connection
-        try:
-            if getattr(self.scanner, 'ser', None):
-                try:
-                    self.scanner.ser.close()
-                except Exception:
-                    pass
-                self.scanner.ser = None
-        except Exception:
-            pass
-
-        self.scanner.serial_port = port
-        self.scanner.baud_rate = baud
+        self._firmware_verified = False
+        self._loading_position_uncertain = True
+        self._update_controls_state()
         self.log_status(f"Connecting to Arduino on {port} @ {baud}...")
+        self.connect_btn.configure(text="Connecting...", state=tk.DISABLED, bg='#FF9800')
 
-        # Disable button while connecting to prevent double-clicks
-        try:
-            self.connect_btn.configure(text="Connecting…", state=tk.DISABLED, bg='#FF9800')
-        except Exception:
-            pass
-
-        def _do_connect():
+        def worker():
             ok = False
+            protocol = None
+            sensors = None
             try:
-                if getattr(self, 'arduino_plugin', None):
+                # Only ONE transport may own the COM port; use scanner serial
+                # directly instead of sending motion commands via a plugin.
+                plugin = getattr(self, 'arduino_plugin', None)
+                if plugin and hasattr(plugin, 'disconnect'):
                     try:
-                        ok = bool(self.arduino_plugin.connect(port, baud))
+                        plugin.disconnect()
                     except Exception:
-                        ok = False
+                        pass
+                if getattr(self.scanner, 'ser', None):
+                    try:
+                        self.scanner.ser.close()
+                    except Exception:
+                        pass
+                    self.scanner.ser = None
+                self.scanner.serial_port = port
+                self.scanner.baud_rate = baud
+                ok = bool(self.scanner.init_serial())
+                if ok:
+                    protocol = self.scanner.send_to_arduino("QueryFirmware")
+                    if protocol == self.FIRMWARE_PROTOCOL:
+                        sensors = self.scanner.send_to_arduino("QuerySensors")
+            except Exception as exc:
+                self.root.after(0, lambda detail=str(exc):
+                                self.log_status(f"Arduino connection error: {detail}", error=True))
 
+            def completed():
+                self._firmware_verified = bool(ok and protocol == self.FIRMWARE_PROTOCOL)
                 if not ok:
-                    try:
-                        ok = bool(self.scanner.init_serial())
-                    except Exception as e:
-                        self.root.after(0, lambda err=e: self.log_error('E405', str(err)))
-                        ok = False
-            except Exception as e:
-                self.root.after(0, lambda err=e: self.log_error('E405', str(err)))
-                ok = False
-
-            def _on_done(success):
-                if success:
-                    self.log_status("✓ Arduino connected")
-                    try:
-                        self.connect_btn.configure(text="Connected", state=tk.DISABLED, bg='#4CAF50')
-                    except Exception:
-                        pass
-                    self.machine_started = False
-                    self.machine_parked_for_loading = False
-                    self.loading_return_ready = False
-                    if not self._sync_loading_status():
-                        self._loading_position_uncertain = True
-                        self.log_status("Firmware loading state unavailable; update Main.ino first", error=True)
-                        self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
-                    self._update_controls_state()
+                    self._loading_position_uncertain = True
+                    self.log_status("Arduino port/handshake failed", error=True)
+                    self.connect_btn.configure(text="Connect", state=tk.NORMAL, bg='#FF9800')
+                elif not self._firmware_verified:
+                    self._loading_position_uncertain = True
+                    self.log_status(
+                        "Serial port connected, but firmware protocol is wrong. "
+                        f"Expected {self.FIRMWARE_PROTOCOL}; received {protocol!r}. "
+                        "Flash the newest Current version/Main/Main.ino before moving.", error=True)
+                    self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
                 else:
-                    self.log_error('E403')
-                    try:
-                        self.connect_btn.configure(text="Connect", state=tk.NORMAL, bg='#FF9800')
-                    except Exception:
-                        pass
-                    messagebox.showerror(
-                        "Arduino",
-                        "Failed to connect to Arduino.\n\n"
-                        "- Verify the COM port\n"
-                        "- Verify baud rate\n"
-                        "- Ensure Arduino is plugged in\n"
-                        "- Ensure pyserial is installed"
-                    )
+                    self._loading_position_uncertain = not self._apply_loading_sensor_status(sensors)
+                    if self._loading_position_uncertain:
+                        self.log_status("Connected, but position status unavailable; no motion allowed", error=True)
+                        self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
+                    else:
+                        self.log_status("✓ Arduino connected; endstop-loading firmware verified")
+                        self.connect_btn.configure(text="Connected", state=tk.DISABLED, bg='#4CAF50')
+                self._update_controls_state()
 
-            self.root.after(0, lambda: _on_done(ok))
+            self.root.after(0, completed)
 
-        threading.Thread(target=_do_connect, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def _arduino_connected(self):
-        """Either the scanner serial port or the optional Arduino plugin may be connected."""
+        """Physical transport connected; firmware validation checked separately."""
         if self.scanner and getattr(self.scanner, 'ser', None):
             try:
-                if self.scanner.ser.is_open:
-                    return True
+                return bool(self.scanner.ser.is_open)
             except Exception:
                 return True
-        plugin = getattr(self, 'arduino_plugin', None)
-        try:
-            return bool(plugin and plugin.is_connected())
-        except Exception:
-            return False
+        return False
 
     def _apply_loading_sensor_status(self, response):
         """Reconcile UI state with firmware; never infer a successful move."""
