@@ -11,7 +11,7 @@ import unittest
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / "gui_interface_enhanced.py"
 tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
 klass = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ScannerGUI")
-needed = {"_apply_loading_sensor_status", "_update_controls_state"}
+needed = {"_apply_loading_sensor_status", "_update_controls_state", "_refresh_scan_mode_label", "_sort_cycle_allowed_for_camera"}
 methods = [n for n in klass.body if isinstance(n, ast.FunctionDef) and n.name in needed]
 assert len(methods) == len(needed), "Expected loading state functions missing"
 mod = ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[]))
@@ -31,8 +31,11 @@ class FakeWidget:
 class GuiHarness:
     _apply_loading_sensor_status = namespace["_apply_loading_sensor_status"]
     _update_controls_state = namespace["_update_controls_state"]
+    _refresh_scan_mode_label = namespace["_refresh_scan_mode_label"]
+    _sort_cycle_allowed_for_camera = namespace["_sort_cycle_allowed_for_camera"]
 
     def __init__(self):
+        self.auto_scan = True
         self.machine_started = False
         self.machine_parked_for_loading = False
         self.loading_return_ready = False
@@ -55,6 +58,7 @@ class GuiHarness:
         self.stop_machine_btn = FakeWidget()
         self.machine_state_label = FakeWidget()
         self.loading_hint_label = FakeWidget()
+        self.scan_mode_label = FakeWidget()
 
     def _arduino_connected(self):
         return True
