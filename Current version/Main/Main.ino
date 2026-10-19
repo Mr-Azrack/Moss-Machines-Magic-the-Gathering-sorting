@@ -640,23 +640,26 @@ void DetermineAction() {
   }
 
   if (Tempval1 == "StartMachine") {
+    // START must NEVER reposition the head. The operator explicitly HOMEs
+    // with an empty hopper or returns from park BEFORE inserting/sorting.
     if (loadingParked || loadingMotionActive || loadingRecoveryRequired) {
       REPORT_ERROR(EC_LOADING_POSITION, "Return/Home first");
       return;
     }
-    abortRequested = false;
-    machineStarted = false;
-    // After loading, use the verified inverse XY move rather than a fresh
-    // homing descent into a hopper that now contains cards.
-    if (!(loadingReturnReady && atHomePosition && zPositionSteps == 0)) {
-      Homemachine();
-      if (!atHomePosition) {
-        PrintLCD("START FAILED", "Home failed");
-        return;
-      }
+    if (!atHomePosition) {
+      REPORT_ERROR(EC_NOT_AT_HOME, "Home first");
+      PrintLCD("START BLOCKED", "HOME required");
+      return;
     }
-    loadingReturnReady = false;
+    if (zPositionSteps != 0) {
+      REPORT_ERROR(EC_Z_TRAVEL_HEIGHT, "Z not at travel");
+      PrintLCD("START BLOCKED", "Z not raised");
+      return;
+    }
+    // Position already verified. Only arm sorting; do not issue motor steps.
+    abortRequested = false;
     machineStarted = true;
+    loadingReturnReady = false;
     Serial.println("<OK,MachineStarted>");
     PrintLCD("Machine STARTED", "Accepting cards");
     return;
