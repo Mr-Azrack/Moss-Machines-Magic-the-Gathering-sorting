@@ -101,6 +101,11 @@ const byte ENDSTOP_TRIGGERED = LOW;
 void setup() {
   byte pins[] = { Xstep, Ystep, Zstep, E0step, E1step, Xdir, Ydir, Zdir, E0dir, E1dir, Xenable, Yenable, Zenable, E0enable, E1enable, Vacuum1, Vacuum2, Lights};
   for (byte pin : pins) { pinMode(pin, OUTPUT); }
+  // Endstops are active LOW (pressed = 0). Floating INPUT pins can
+  // falsely read 0 and make LOAD CARDS claim it reached the switches
+  // without moving. Pull-ups make an open switch reliably read HIGH.
+  byte endstopPins[] = {Xmin, Xmax, Ymin, Ymax, Zmin, Zmax};
+  for (byte pin : endstopPins) { pinMode(pin, INPUT_PULLUP); }
 
   digitalWrite(Xenable, LOW);
   digitalWrite(Yenable, LOW);
@@ -434,6 +439,16 @@ void ParkForLoading() {
   if (loadingRecoveryRequired || !atHomePosition || zPositionSteps != 0) {
     REPORT_ERROR(EC_LOADING_POSITION, "Empty hopper/Home"); return;
   }
+  // At the normal pickup coordinate the head is offset AWAY from all three
+  // switches. If any already reads pressed, report a wiring/position fault
+  // instead of falsely claiming a park completed with no motor movement.
+  ReadEndstops();
+  if (Z_ENDSTOP_MIN == ENDSTOP_TRIGGERED ||
+      X_ENDSTOP_MAX == ENDSTOP_TRIGGERED ||
+      Y_ENDSTOP_MIN == ENDSTOP_TRIGGERED) {
+    loadingSeekFailure("Switch active at home");
+    return;
+  }
   abortRequested = false;
   loadingMotionActive = true;
   stopVacuumCarryPulse();
@@ -444,8 +459,13 @@ void ParkForLoading() {
 
   // Raise to the physical Zmin stop. Normal Z=0 travel height is below it.
   unsigned long zStart = millis();
+  long zMoved = 0;
   while (digitalRead(Zmin) != ENDSTOP_TRIGGERED) {
+    if (zMoved >= PICKUP_Z_FROM_LIMIT_STEPS + 750L) {
+      loadingSeekFailure("Z limit not reached"); return;
+    }
     Move1(1, 3, zespeed);  // Z UP ONLY
+    zMoved += 3;
     if (abortRequested) { loadingSeekFailure("Z interrupted"); return; }
     if (millis() - zStart > LOADING_Z_SEEK_TIMEOUT_MS) {
       loadingSeekFailure("Z timeout"); return;
@@ -456,16 +476,26 @@ void ParkForLoading() {
   // Same seek directions used by Homemachine(), but no backoff, Z descent,
   // pickup, tray selection, vacuum action, or return move during parking.
   unsigned long yStart = millis();
+  long yMoved = 0;
   while (digitalRead(Ymin) != ENDSTOP_TRIGGERED) {
+    if (yMoved >= (long)Ycal * 2L + 38L + 750L) {
+      loadingSeekFailure("Y limit not reached"); return;
+    }
     Move4(0, 1, 0, 5);
+    yMoved += 5;
     if (abortRequested) { loadingSeekFailure("Y interrupted"); return; }
     if (millis() - yStart > LOADING_XY_SEEK_TIMEOUT_MS) {
       loadingSeekFailure("Y timeout"); return;
     }
   }
   unsigned long xStart = millis();
+  long xMoved = 0;
   while (digitalRead(Xmax) != ENDSTOP_TRIGGERED) {
+    if (xMoved >= (long)Xcal * 3L + 55L + 750L) {
+      loadingSeekFailure("X limit not reached"); return;
+    }
     Move4(0, 1, 3, 0);
+    xMoved += 3;
     if (abortRequested) { loadingSeekFailure("X interrupted"); return; }
     if (millis() - xStart > LOADING_XY_SEEK_TIMEOUT_MS) {
       loadingSeekFailure("X timeout"); return;
