@@ -38,6 +38,8 @@ class GuiHarness:
         self.loading_return_ready = False
         self._loading_motion_active = False
         self._loading_position_uncertain = False
+        self._firmware_verified = True
+        self._loading_recovery_required = False
         self.sensor_data = {}
         self._scan_in_progress = False
         self.home_btn = FakeWidget()
@@ -62,18 +64,18 @@ class LoadingParkGuiTests(unittest.TestCase):
     def test_park_disables_start_home_jog_enables_return(self):
         gui = GuiHarness()
         self.assertTrue(gui._apply_loading_sensor_status(
-            "Sensors,home=0,parked=1,loadready=0,started=0"))
+            "Sensors,home=0,parked=1,loadready=0,started=0,parkmode=endstops3,recover=0,xmin=1,xmax=0,ymin=0,zmin=0"))
         self.assertEqual(gui.start_machine_btn.state(), "disabled")
         self.assertEqual(gui.home_btn.state(), "disabled")
         self.assertEqual(gui.movement_buttons[0].state(), "disabled")
         self.assertEqual(gui.camera_load_btn.state(), "disabled")
         self.assertEqual(gui.camera_return_btn.state(), "normal")
-        self.assertIn("LOADING POSITION", gui.machine_state_label.options["text"])
+        self.assertIn("PARKED AT ENDSTOPS", gui.machine_state_label.options["text"])
 
     def test_return_allows_start_and_park(self):
         gui = GuiHarness()
         self.assertTrue(gui._apply_loading_sensor_status(
-            "<Sensors,home=1,parked=0,loadready=1,started=0>"))
+            "<Sensors,home=1,parked=0,loadready=1,started=0,parkmode=endstops3,recover=0,xmin=1,xmax=1,ymin=1,zmin=1>"))
         self.assertEqual(gui.start_machine_btn.state(), "normal")
         self.assertEqual(gui.camera_return_btn.state(), "disabled")
         self.assertEqual(gui.camera_load_btn.state(), "normal")
@@ -82,7 +84,7 @@ class LoadingParkGuiTests(unittest.TestCase):
     def test_started_disables_loading_and_manual(self):
         gui = GuiHarness()
         gui._apply_loading_sensor_status(
-            "Sensors,home=1,parked=0,loadready=0,started=1")
+            "Sensors,home=1,parked=0,loadready=0,started=1,parkmode=endstops3,recover=0,xmin=1,xmax=1,ymin=1,zmin=1")
         self.assertEqual(gui.start_machine_btn.state(), "disabled")
         self.assertEqual(gui.stop_machine_btn.state(), "normal")
         self.assertEqual(gui.camera_load_btn.state(), "disabled")
@@ -94,6 +96,37 @@ class LoadingParkGuiTests(unittest.TestCase):
         for w in [gui.start_machine_btn, gui.home_btn, gui.camera_load_btn,
                   gui.camera_return_btn]:
             self.assertEqual(w.state(), "disabled")
+
+    def test_old_grid_park_protocol_rejected(self):
+        gui = GuiHarness()
+        self.assertFalse(gui._apply_loading_sensor_status(
+            "Sensors,home=0,parked=1,loadready=0,started=0,"
+            "parkmode=grid,recover=0,xmin=1,xmax=1,ymin=1,zmin=1"))
+        self.assertFalse(gui.machine_parked_for_loading)
+
+    def test_park_cannot_claim_endstops_without_switches(self):
+        gui = GuiHarness()
+        self.assertFalse(gui._apply_loading_sensor_status(
+            "Sensors,home=0,parked=1,loadready=0,started=0,"
+            "parkmode=endstops3,recover=0,xmin=1,xmax=1,ymin=0,zmin=0"))
+        self.assertFalse(gui.machine_parked_for_loading)
+
+    def test_recovery_allows_only_home(self):
+        gui = GuiHarness()
+        self.assertTrue(gui._apply_loading_sensor_status(
+            "Sensors,home=0,parked=0,loadready=0,started=0,"
+            "parkmode=endstops3,recover=1,xmin=1,xmax=1,ymin=1,zmin=1"))
+        self.assertEqual(gui.home_btn.state(), "normal")
+        self.assertEqual(gui.start_machine_btn.state(), "disabled")
+        self.assertEqual(gui.camera_load_btn.state(), "disabled")
+        self.assertIn("RECOVERY REQUIRED", gui.machine_state_label.options["text"])
+
+    def test_unverified_firmware_rejects_valid_sensor_frame(self):
+        gui = GuiHarness()
+        gui._firmware_verified = False
+        self.assertFalse(gui._apply_loading_sensor_status(
+            "Sensors,home=1,parked=0,loadready=0,started=0,"
+            "parkmode=endstops3,recover=0,xmin=1,xmax=1,ymin=1,zmin=1"))
 
     def test_sensor_protocol_must_include_home_park_and_started(self):
         gui = GuiHarness()

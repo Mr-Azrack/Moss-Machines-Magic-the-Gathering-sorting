@@ -186,6 +186,8 @@ class ScannerGUI:
         self.loading_return_ready = False
         self._loading_motion_active = False
         self._loading_position_uncertain = False
+        self._firmware_verified = False
+        self._loading_recovery_required = False
         self._arduino_tx_lock = threading.Lock()  # serialize plugin and scanner command/reply pairs
         # Camera canvas size (adjustable to make UI fit on smaller screens)
         self.canvas_width = 600
@@ -2102,142 +2104,153 @@ class ScannerGUI:
                 self.scanner.auto_vector_when_unfiltered = False
                 self.scanner.vector_searcher = None
     
+    FIRMWARE_PROTOCOL = "Firmware,MOSS-ENDSTOP-PARK-3"
+
     def connect_arduino(self):
-        """Connect to Arduino"""
+        """Use the tested native serial protocol for all physical movement.
+
+        A generic Arduino plugin may connect yet lack correct command parsing,
+        or return its own readiness message. It must never send motor commands
+        until the exact firmware protocol has been established.
+        """
         if not self.scanner:
             self.log_status("Scanner not initialized", error=True)
             return
-
         port = (self.serial_port_var.get() if hasattr(self, 'serial_port_var') else '').strip()
         baud_raw = (self.baud_var.get() if hasattr(self, 'baud_var') else '').strip()
-
         if not port:
-            self.log_status("Please enter a serial port (e.g., COM3)", error=True)
-            messagebox.showwarning("Arduino", "Please enter a serial port (e.g., COM3)")
+            self.log_status("Enter the Arduino COM port", error=True)
+            messagebox.showwarning("Arduino", "Enter the Arduino COM port.")
             return
-
         try:
             baud = int(baud_raw or '9600')
         except Exception:
             baud = 9600
 
-        # Close any existing connection
-        try:
-            if getattr(self.scanner, 'ser', None):
-                try:
-                    self.scanner.ser.close()
-                except Exception:
-                    pass
-                self.scanner.ser = None
-        except Exception:
-            pass
-
-        self.scanner.serial_port = port
-        self.scanner.baud_rate = baud
+        self._firmware_verified = False
+        self._loading_position_uncertain = True
+        self._update_controls_state()
         self.log_status(f"Connecting to Arduino on {port} @ {baud}...")
+        self.connect_btn.configure(text="Connecting...", state=tk.DISABLED, bg='#FF9800')
 
-        # Disable button while connecting to prevent double-clicks
-        try:
-            self.connect_btn.configure(text="Connecting…", state=tk.DISABLED, bg='#FF9800')
-        except Exception:
-            pass
-
-        def _do_connect():
+        def worker():
             ok = False
+            protocol = None
+            sensors = None
             try:
-                if getattr(self, 'arduino_plugin', None):
+                # Only ONE transport may own the COM port; use scanner serial
+                # directly instead of sending motion commands via a plugin.
+                plugin = getattr(self, 'arduino_plugin', None)
+                if plugin and hasattr(plugin, 'disconnect'):
                     try:
-                        ok = bool(self.arduino_plugin.connect(port, baud))
+                        plugin.disconnect()
                     except Exception:
-                        ok = False
+                        pass
+                if getattr(self.scanner, 'ser', None):
+                    try:
+                        self.scanner.ser.close()
+                    except Exception:
+                        pass
+                    self.scanner.ser = None
+                self.scanner.serial_port = port
+                self.scanner.baud_rate = baud
+                ok = bool(self.scanner.init_serial())
+                if ok:
+                    protocol = self.scanner.send_to_arduino("QueryFirmware")
+                    if protocol == self.FIRMWARE_PROTOCOL:
+                        sensors = self.scanner.send_to_arduino("QuerySensors")
+            except Exception as exc:
+                self.root.after(0, lambda detail=str(exc):
+                                self.log_status(f"Arduino connection error: {detail}", error=True))
 
+            def completed():
+                self._firmware_verified = bool(ok and protocol == self.FIRMWARE_PROTOCOL)
                 if not ok:
-                    try:
-                        ok = bool(self.scanner.init_serial())
-                    except Exception as e:
-                        self.root.after(0, lambda err=e: self.log_error('E405', str(err)))
-                        ok = False
-            except Exception as e:
-                self.root.after(0, lambda err=e: self.log_error('E405', str(err)))
-                ok = False
-
-            def _on_done(success):
-                if success:
-                    self.log_status("✓ Arduino connected")
-                    try:
-                        self.connect_btn.configure(text="Connected", state=tk.DISABLED, bg='#4CAF50')
-                    except Exception:
-                        pass
-                    self.machine_started = False
-                    self.machine_parked_for_loading = False
-                    self.loading_return_ready = False
-                    if not self._sync_loading_status():
-                        self._loading_position_uncertain = True
-                        self.log_status("Firmware loading state unavailable; update Main.ino first", error=True)
-                        self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
-                    self._update_controls_state()
+                    self._loading_position_uncertain = True
+                    self.log_status("Arduino port/handshake failed", error=True)
+                    self.connect_btn.configure(text="Connect", state=tk.NORMAL, bg='#FF9800')
+                elif not self._firmware_verified:
+                    self._loading_position_uncertain = True
+                    self.log_status(
+                        "Serial port connected, but firmware protocol is wrong. "
+                        f"Expected {self.FIRMWARE_PROTOCOL}; received {protocol!r}. "
+                        "Flash the newest Current version/Main/Main.ino before moving.", error=True)
+                    self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
                 else:
-                    self.log_error('E403')
-                    try:
-                        self.connect_btn.configure(text="Connect", state=tk.NORMAL, bg='#FF9800')
-                    except Exception:
-                        pass
-                    messagebox.showerror(
-                        "Arduino",
-                        "Failed to connect to Arduino.\n\n"
-                        "- Verify the COM port\n"
-                        "- Verify baud rate\n"
-                        "- Ensure Arduino is plugged in\n"
-                        "- Ensure pyserial is installed"
-                    )
+                    self._loading_position_uncertain = not self._apply_loading_sensor_status(sensors)
+                    if self._loading_position_uncertain:
+                        self.log_status("Connected, but position status unavailable; no motion allowed", error=True)
+                        self.connect_btn.configure(text="Reconnect", state=tk.NORMAL, bg='#FF9800')
+                    else:
+                        self.log_status("✓ Arduino connected; endstop-loading firmware verified")
+                        self.connect_btn.configure(text="Connected", state=tk.DISABLED, bg='#4CAF50')
+                self._update_controls_state()
 
-            self.root.after(0, lambda: _on_done(ok))
+            self.root.after(0, completed)
 
-        threading.Thread(target=_do_connect, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def _arduino_connected(self):
-        """Either the scanner serial port or the optional Arduino plugin may be connected."""
+        """Physical transport connected; firmware validation checked separately."""
         if self.scanner and getattr(self.scanner, 'ser', None):
             try:
-                if self.scanner.ser.is_open:
-                    return True
+                return bool(self.scanner.ser.is_open)
             except Exception:
                 return True
-        plugin = getattr(self, 'arduino_plugin', None)
-        try:
-            return bool(plugin and plugin.is_connected())
-        except Exception:
-            return False
+        return False
 
     def _apply_loading_sensor_status(self, response):
-        """Reconcile UI state with firmware; never infer a successful move."""
-        normalized_response = str(response or '').strip().strip('<>')
-        if not normalized_response.startswith("Sensors,"):
+        """Accept only authoritative position data from the new endstop firmware."""
+        normalized = str(response or '').strip().strip('<>')
+        if not self._firmware_verified or not normalized.startswith("Sensors,"):
             return False
         parts = {}
-        for part in normalized_response.split(',')[1:]:
+        for part in normalized.split(',')[1:]:
             if '=' in part:
-                k, v = part.split('=', 1)
-                parts[k.strip()] = v.strip()
-        if 'parked' not in parts or 'started' not in parts or 'home' not in parts:
-            return False  # Firmware must support the loading interlock protocol.
+                key, val = part.split('=', 1)
+                parts[key.strip()] = val.strip()
+
+        # Older firmware has 'parked' too, but that refers to a tray-grid
+        # move and may still send an unintended pickup. Explicitly reject it.
+        required = {'home', 'parked', 'loadready', 'started',
+                    'parkmode', 'recover', 'xmin', 'xmax', 'ymin', 'zmin'}
+        if not required.issubset(parts) or parts['parkmode'] != 'endstops3':
+            return False
         try:
-            self.machine_started = int(parts['started']) == 1
-            self.machine_parked_for_loading = int(parts['parked']) == 1
-            self.loading_return_ready = int(parts.get('loadready', 0)) == 1
-            self.sensor_data['home'] = int(parts['home'])
-            self.sensor_data['parked'] = int(parts['parked'])
-            self.sensor_data['loadready'] = int(parts.get('loadready', 0))
-            self.sensor_data['started'] = int(parts['started'])
-            self._loading_position_uncertain = False
+            started = int(parts['started']) == 1
+            parked = int(parts['parked']) == 1
+            ready = int(parts['loadready']) == 1
+            home = int(parts['home']) == 1
+            recovery = int(parts['recover']) == 1
+            # LOW means switch triggered in current firmware.
+            if parked and (int(parts['zmin']) != 0 or
+                           int(parts['xmax']) != 0 or int(parts['ymin']) != 0):
+                return False
+            if parked and (started or ready or home):
+                return False
+            if ready and not home:
+                return False
+            if recovery and (ready or parked or started):
+                return False
         except (TypeError, ValueError):
             return False
+
+        self.machine_started = started
+        self.machine_parked_for_loading = parked
+        self.loading_return_ready = ready
+        self._loading_recovery_required = recovery
+        self.sensor_data['home'] = int(home)
+        self.sensor_data['parked'] = int(parked)
+        self.sensor_data['loadready'] = int(ready)
+        self.sensor_data['started'] = int(started)
+        self.sensor_data['recover'] = int(recovery)
+        self._loading_position_uncertain = False
         self._update_controls_state()
         return True
 
     def _sync_loading_status(self):
         """Fetch firmware-confirmed location after connection or uncertain reply."""
-        if not self._arduino_connected():
+        if not self._arduino_connected() or not self._firmware_verified:
             return False
         try:
             result = self._send_arduino("QuerySensors")
@@ -2254,18 +2267,21 @@ class ScannerGUI:
     def _loading_move(self, command):
         """Send a state-checked head move off the Tk main thread."""
         if (self.machine_started or self._loading_motion_active or
-                self._loading_position_uncertain or not self._arduino_connected() or
+                self._loading_position_uncertain or self._loading_recovery_required or
+                not self._firmware_verified or not self._arduino_connected() or
                 getattr(self, '_scan_in_progress', False)):
             self.log_status("Stop scanning, connect Arduino, and verify position first", error=True)
             return
-        if command == "ParkForLoading" and self.machine_parked_for_loading:
+        if command == "ParkForLoading" and (
+                self.machine_parked_for_loading or not self.sensor_data.get('home')):
+            self.log_status("Home an empty machine before parking; remove all cards first", error=True)
             return
         if command == "ReturnFromLoading" and not self.machine_parked_for_loading:
             return
 
         self._loading_motion_active = True
         self._update_controls_state()
-        self.log_status("→ " + command + " (keep hands clear while moving)")
+        self.log_status("→ " + command + " (Z raises to Zmin, then Xmax/Ymin; NO pickup)")
 
         def worker():
             try:
@@ -2277,11 +2293,18 @@ class ScannerGUI:
             # Query firmware even after errors, so a lost OK cannot mistakenly
             # leave START enabled while the head is still parked.
             sensor_reply = None
-            try:
-                if self._arduino_connected():
-                    sensor_reply = self._send_arduino("QuerySensors")
-            except Exception:
-                pass
+            # A missing motion acknowledgement means the physical state is
+            # UNKNOWN. Do not queue QuerySensors while firmware may still be
+            # seeking a limit (a stale ACK was the old disconnect symptom).
+            if response and (
+                "OK,LoadingParked" in str(response) or
+                "OK,LoadingReady" in str(response) or
+                str(response).startswith("Error,")):
+                try:
+                    if self._arduino_connected():
+                        sensor_reply = self._send_arduino("QuerySensors")
+                except Exception:
+                    pass
 
             def completed():
                 self._loading_motion_active = False
@@ -2298,7 +2321,7 @@ class ScannerGUI:
                         pass
                 if command_ok and status_ok:
                     if command == "ParkForLoading" and self.machine_parked_for_loading:
-                        self.log_status("✓ Head clear. Load cards; then click RETURN TO PICKUP.")
+                        self.log_status("✓ Zmin/Xmax/Ymin confirmed. Load cards; then RETURN TO PICKUP.")
                     elif command == "ReturnFromLoading" and self.loading_return_ready:
                         self.log_status("✓ Back at pickup. Clear hands and press START.")
                     else:
@@ -2313,99 +2336,142 @@ class ScannerGUI:
             self.root.after(0, completed)
         threading.Thread(target=worker, daemon=True).start()
 
-    def start_machine(self):
-        """Start only when the head is back at pickup and not in loading mode."""
-        if not self._arduino_connected():
-            self.log_status("Arduino not connected", error=True)
+    def _run_control_motion(self, command, expected):
+        """Keep UI responsive through homing and startup (can take >5 seconds)."""
+        if (not self._firmware_verified or not self._arduino_connected() or
+                self._loading_position_uncertain or self._loading_motion_active):
+            self.log_status("Firmware or machine position not verified", error=True)
             return
-        if self.machine_parked_for_loading or self._loading_position_uncertain or self._loading_motion_active:
-            self.log_status("Return head to pickup and verify position before START", error=True)
-            messagebox.showwarning("Load Cards", "Return to pickup before starting.")
+        if self.machine_parked_for_loading:
+            self.log_status("Return from loading before another movement", error=True)
+            return
+        if command == "StartMachine" and (
+                not self.sensor_data.get('home') or self._loading_recovery_required):
+            self.log_status("Home is required before starting", error=True)
+            return
+        if command == "HomeButton" and self.machine_started:
+            self.log_status("Stop sorting before homing", error=True)
             return
 
-        response = self._send_arduino("StartMachine")
-        if response and "OK,MachineStarted" in response:
-            self.machine_started = True
-            self.loading_return_ready = False
-            self._update_controls_state()
-            self.log_status("✓ Machine STARTED - Manual controls disabled")
-        else:
-            self.log_status("✗ Failed to start machine: " + str(response), error=True)
-            if response: self._handle_arduino_response(response, "StartMachine")
-            messagebox.showerror("Error", "Failed to start machine")
+        # Rehoming can lower Z into the pickup area. Require empty hopper.
+        if command == "HomeButton" and not messagebox.askokcancel(
+                "Clear pickup first",
+                "Remove every card from the pickup hopper and keep hands clear.\n"
+                "The machine will seek its hardware endstops. Continue?"):
+            return
+
+        self._loading_motion_active = True
+        self._update_controls_state()
+        self.log_status("→ " + command)
+
+        def worker():
+            response = self._send_arduino(command)
+            sensors = None
+            if response and expected in str(response):
+                sensors = self._send_arduino("QuerySensors")
+            elif response and str(response).startswith("Error,"):
+                sensors = self._send_arduino("QuerySensors")
+
+            def completed():
+                self._loading_motion_active = False
+                got_position = self._apply_loading_sensor_status(sensors)
+                if response and expected in str(response) and got_position:
+                    self.log_status("✓ " + command + " complete")
+                else:
+                    self._loading_position_uncertain = not got_position
+                    self.log_status("✗ " + command + ": " + str(response), error=True)
+                    if response and str(response).startswith("Error,"):
+                        self._handle_arduino_response(response, command)
+                self._update_controls_state()
+            self.root.after(0, completed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_machine(self):
+        self._run_control_motion("StartMachine", "OK,MachineStarted")
 
     def arduino_home(self):
-        """Home only when unloaded and not at the loading park."""
-        if self.machine_started or self._loading_motion_active or self.machine_parked_for_loading:
-            self.log_status("Stop machine and return from loading before Home", error=True)
-            messagebox.showwarning("Machine Position", "Return from loading before using Home.")
-            return
-        if not self._arduino_connected() or self._loading_position_uncertain:
-            self.log_status("Arduino position not verified", error=True)
-            return
-        response = self._send_arduino("HomeButton")
-        self.log_status("→ HomeButton")
-        if response and "OK,MachineHomed" in response:
-            self._sync_loading_status()
-            self.log_status("✓ Homed")
-        else:
-            self.log_status("✗ Home not confirmed: " + str(response), error=True)
-            if response: self._handle_arduino_response(response, "HomeButton")
+        self._run_control_motion("HomeButton", "OK,MachineHomed")
 
     def stop_machine(self):
-        """Stop sorting so the loading-park command can be used."""
-        if not self._arduino_connected():
-            self.log_status("Arduino not connected", error=True)
+        """Send STOP immediately even when a sorting/parking transaction is busy."""
+        if not self._firmware_verified or not self._arduino_connected():
+            self.log_status("Arduino firmware not connected/verified", error=True)
             return
-        response = self._send_arduino("StopMachine")
-        if response and "OK,MachineStopped" in response:
-            self.machine_started = False
-            self._update_controls_state()
-            self.log_status("✓ Machine STOPPED - Load Cards available if homed")
-        else:
-            self.log_status("✗ Failed to stop machine: " + str(response), error=True)
-            if response: self._handle_arduino_response(response, "StopMachine")
+        if not self.scanner.emergency_stop():
+            self.log_status("STOP transmit failed — use the hardware stop", error=True)
+            return
+
+        # Do not wait on the serial transaction lock in the Tk GUI thread.
+        # Mid-stroke position must be treated as unsafe until rechecked.
+        self._loading_position_uncertain = True
+        self.log_status("STOP sent. Verify position; empty hopper before recovery.", error=True)
+        self._update_controls_state()
+
+        def reconcile():
+            # Existing in-flight read must finish before the status query.
+            # The firmware polls STOP during homing, sorting and parking.
+            response = self._send_arduino("QuerySensors")
+            self.root.after(0, lambda value=response: self._stop_status_ready(value))
+
+        threading.Thread(target=reconcile, daemon=True).start()
+
+    def _stop_status_ready(self, response):
+        if not self._apply_loading_sensor_status(response):
+            self._loading_position_uncertain = True
+            self.log_status("STOP acknowledged by serial write, but position status is unknown", error=True)
+        self._update_controls_state()
 
     def _update_controls_state(self):
-        """Loading motion is isolated from normal start, home and jogging."""
+        """Never enable motion controls without validated firmware and location."""
+        connected = self._arduino_connected() and self._firmware_verified
         busy = self._loading_motion_active
         parked = self.machine_parked_for_loading
         uncertain = self._loading_position_uncertain
-        connected = self._arduino_connected()
-        manual_allowed = connected and not (self.machine_started or parked or busy or uncertain)
-        state = tk.NORMAL if manual_allowed else tk.DISABLED
+        recovery = self._loading_recovery_required
+        active = self.machine_started
+        homed = bool(self.sensor_data.get('home'))
 
-        self.home_btn.configure(state=state)
+        can_home = connected and not (busy or parked or uncertain or active)
+        can_manual = can_home and not recovery
+        can_park = can_manual and homed and not getattr(self, '_scan_in_progress', False)
+        can_return = connected and parked and not (busy or uncertain or active or recovery)
+        can_start = connected and homed and not (busy or parked or uncertain or active or recovery)
+        self.home_btn.configure(state=tk.NORMAL if can_home else tk.DISABLED)
         for checkbox in self.motor_checkboxes.values():
-            checkbox.configure(state=state)
+            checkbox.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
         for button in self.movement_buttons:
-            button.configure(state=state)
-        self.upload_params_btn.configure(state=state)
-        self.fetch_params_btn.configure(state=state)
-
-        can_park = manual_allowed and not getattr(self, '_scan_in_progress', False)
+            button.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
+        self.upload_params_btn.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
+        self.fetch_params_btn.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
         self.load_cards_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
         self.camera_load_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
-        can_return = connected and parked and not (self.machine_started or busy or uncertain)
         self.return_from_loading_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
         self.camera_return_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
-        self.start_machine_btn.configure(
-            state=tk.NORMAL if connected and not (self.machine_started or parked or busy or uncertain) else tk.DISABLED)
-        self.stop_machine_btn.configure(
-            state=tk.NORMAL if connected and self.machine_started and not busy else tk.DISABLED)
+        self.start_machine_btn.configure(state=tk.NORMAL if can_start else tk.DISABLED)
+        # STOP remains available DURING a park move (out-of-band serial).
+        self.stop_machine_btn.configure(state=tk.NORMAL if connected and (active or busy) else tk.DISABLED)
 
-        if uncertain:
-            label, color, hint = "● POSITION UNKNOWN", '#ff4444', "Do not load/start; reconnect and verify position."
+        if not self._arduino_connected():
+            label, color, hint = "● DISCONNECTED", '#ff4444', "Connect the Arduino before moving."
+        elif not self._firmware_verified:
+            label, color, hint = "● WRONG FIRMWARE", '#ff4444', "Flash Main.ino with endstop-park protocol 3."
+        elif uncertain:
+            label, color, hint = "● POSITION UNKNOWN", '#ff4444', "Do not move or load until position is verified."
         elif busy:
-            label, color, hint = "● HEAD MOVING", '#FFA726', "Keep hands clear during movement."
+            label, color, hint = "● MOVING — KEEP CLEAR", '#FFA726', "STOP can interrupt. Keep hands away."
+        elif recovery:
+            label, color, hint = "● RECOVERY REQUIRED", '#ff4444', "EMPTY THE HOPPER; then HOME to recover."
         elif parked:
-            label, color, hint = "● LOADING POSITION", '#FFA726', "Load cards now, then click RETURN TO PICKUP."
-        elif self.machine_started:
+            label, color, hint = "● PARKED AT ENDSTOPS", '#FFA726', "Zmin, Xmax, Ymin triggered. Load cards; then RETURN."
+        elif active:
             label, color, hint = "● STARTED", '#44ff44', "Sorting enabled."
         elif self.loading_return_ready:
-            label, color, hint = "● READY TO START", '#44ff44', "Clear hands and click START."
+            label, color, hint = "● READY TO START", '#44ff44', "Returned to pickup; clear hands and START."
+        elif not homed:
+            label, color, hint = "● NOT HOMED", '#FFA726', "Empty hopper before HOME."
         else:
-            label, color, hint = "● STOPPED", '#ff4444', "STOP → LOAD CARDS → place stack → RETURN TO PICKUP → START"
+            label, color, hint = "● STOPPED / AT PICKUP", '#fff', "LOAD CARDS → Z up + endstops → RETURN TO PICKUP → START"
         self.machine_state_label.configure(text=label, fg=color)
         self.loading_hint_label.configure(text=hint)
 
@@ -2480,23 +2546,20 @@ class ScannerGUI:
             self.log_error("E509", context or "params sent while not at home")
 
     def _send_arduino(self, cmd):
-        """Route commands with one lock, including plugin and monitor traffic."""
+        """Only the version-verified native serial path may command hardware."""
+        if not self._arduino_connected():
+            return None
+        # Connecting/probing is permitted BEFORE _firmware_verified is set;
+        # but all other commands require the matched firmware.
+        if not self._firmware_verified and cmd not in ("QueryFirmware", "QuerySensors"):
+            return None
         with self._arduino_tx_lock:
             try:
-                if getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected():
-                    try:
-                        return self.arduino_plugin.send(cmd)
-                    except Exception:
-                        return None
-
-                if self.scanner and getattr(self.scanner, 'ser', None):
-                    try:
-                        return self.scanner.send_to_arduino(cmd)
-                    except Exception:
-                        return None
-            except Exception:
+                return self.scanner.send_to_arduino(cmd)
+            except Exception as error:
+                self.root.after(0, lambda detail=str(error):
+                                self.log_status("Arduino serial: " + detail, error=True))
                 return None
-            return None
 
     def toggle_arduino_monitoring(self):
         """Start/stop Arduino monitoring"""
@@ -2625,52 +2688,48 @@ class ScannerGUI:
             self.log_status(f"✗ Fetch error: {e}", error=True)
             self.log_error('E405', str(e))
     def _arduino_monitor_loop(self):
-        """Monitor Arduino sensors"""
+        """Poll sensors only when idle; route ALL Tk changes to the UI thread."""
         while self.arduino_monitoring:
-            if self.scanner and self.scanner.ser:
+            if (self._arduino_connected() and self._firmware_verified and
+                    not self._loading_motion_active and not self._loading_position_uncertain):
                 try:
-                    # Query sensor data from Arduino
                     response = self._send_arduino("QuerySensors")
-                    
                     if response and str(response).startswith("Sensors,"):
-                        # Apply firmware-authoritative loading state on the Tk thread.
-                        self.root.after(0, lambda value=response: self._apply_loading_sensor_status(value))
-                        parts = response.replace("<", "").replace(">", "").split(",")
-                        for part in parts[1:]:  # Skip "Sensors"
-                            if "=" in part:
-                                key, value = part.split("=")
-                                if key == "range":
-                                    self.sensor_data['range'] = int(value)
-                                    self.range_label.configure(text=f"Range Sensor: {value} mm")
-                                elif key == "started":
-                                    # Update machine state from Arduino
-                                    started_state = int(value) == 1
-                                    if started_state != self.machine_started:
-                                        self.machine_started = started_state
-                                        if started_state:
-                                            self.machine_state_label.configure(text="● STARTED", fg='#44ff44')
-                                            self.start_machine_btn.configure(state=tk.DISABLED)
-                                            self.stop_machine_btn.configure(state=tk.NORMAL)
-                                        else:
-                                            self.machine_state_label.configure(text="● STOPPED", fg='#ff4444')
-                                            self.start_machine_btn.configure(state=tk.NORMAL)
-                                            self.stop_machine_btn.configure(state=tk.DISABLED)
-                                        self._update_controls_state()
-                                elif key in self.sensor_data:
-                                    val = int(value)
-                                    self.sensor_data[key] = val
-                                    if key in self.endstop_labels:
-                                        label = self.endstop_labels[key]
-                                        status = "●" if val == 1 else "○"
-                                        color = "#00ff00" if val == 1 else "#888888"
-                                        name = key.replace("_", "-").upper()
-                                        label.configure(text=f"{name}: {status}", fg=color)
-                except Exception as e:
-                    self.log_status(f"Monitor error: {e}", error=True)
-                    self.log_error('E405', f'monitor_loop:{e}')
-            
+                        self.root.after(0, lambda reply=response: self._show_sensor_status(reply))
+                except Exception as error:
+                    self.root.after(0, lambda detail=str(error):
+                                    self.log_status("Monitor: " + detail, error=True))
             time.sleep(0.5)
-    
+
+    def _show_sensor_status(self, response):
+        """Firmware state and sensor widgets must update atomically on Tk."""
+        if not self._apply_loading_sensor_status(response):
+            self._loading_position_uncertain = True
+            self._update_controls_state()
+            return
+        parts = {}
+        for part in str(response).strip().strip('<>').split(',')[1:]:
+            if '=' in part:
+                key, val = part.split('=', 1)
+                parts[key.strip()] = val.strip()
+        try:
+            if 'range' in parts:
+                distance = int(parts['range'])
+                self.sensor_data['range'] = distance
+                self.range_label.configure(text=f"Range Sensor: {distance} mm")
+            for key, label in self.endstop_labels.items():
+                lookup_key = key.replace("_", "")  # x_min -> xmin
+                if lookup_key not in parts:
+                    continue
+                val = int(parts[lookup_key])
+                self.sensor_data[key] = val
+                # Hardware signals are active LOW: 0 means switch engaged.
+                label.configure(
+                    text=f"{key.upper()}: {'●' if val == 0 else '○'}",
+                    fg='#00ff00' if val == 0 else '#888888')
+        except (ValueError, TypeError):
+            pass
+
     # Old CSV export methods removed - now using collection manager
     
     def _add_to_history(self, card_info, bin_result, sorting_mode):

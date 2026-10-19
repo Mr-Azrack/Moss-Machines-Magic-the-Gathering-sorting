@@ -287,37 +287,81 @@ class OptimizedCardScanner:
     # =====================================================================
     
     def init_serial(self):
-        """Initialize serial connection to Arduino"""
+        """Open Arduino serial and verify that the controller is responsive."""
         if serial is None:
             print(_elog('E401'))
             return False
         if not self.serial_port:
             print(_elog('E402'))
             return False
-        
+
         try:
-            # Set a read timeout so recv operations don't block forever
-            self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=5)
+            # Short reads are retried up to a *per-command* deadline below.
+            # A five-second per-byte timeout previously misreported lengthy
+            # homing/parking moves as disconnected machines.
+            self.ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.25)
             print(f"[+] Serial port {self.serial_port} opened (Baudrate: {self.baud_rate})")
-            if not self.wait_for_arduino():
-                self.ser.close()
-                self.ser = None
-                return False
+            if not self.wait_for_arduino(timeout=15):
+                # Some boards are already running or have lost their startup
+                # banner. A live protocol query is stronger than a banner.
+                probe = self.send_to_arduino("QueryFirmware")
+                if not probe or not probe.startswith("Firmware,"):
+                    self.ser.close()
+                    self.ser = None
+                    return False
             return True
         except Exception as e:
             print(_elog('E403', str(e)))
+            if getattr(self, "ser", None):
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
             return False
-    
+
+    def _expected_arduino_reply(self, command):
+        expected = {
+            "QueryFirmware": "Firmware,",
+            "QuerySensors": "Sensors,",
+            "QueryParams": "Params,",
+            "ParkForLoading": "OK,LoadingParked",
+            "ReturnFromLoading": "OK,LoadingReady",
+            "HomeButton": "OK,MachineHomed",
+            "StartMachine": "OK,MachineStarted",
+            "StopMachine": "OK,MachineStopped",
+        }
+        if command in expected:
+            return expected[command], False
+        if command.startswith("SetMotor,"):
+            return "OK,Motor=", False
+        if command.startswith("SetParam,"):
+            return "OK,Param=", False
+        # Legacy calibration and sort cycles emit only the trailing READY.
+        return "Arduino is ready", True
+
     def send_to_arduino(self, send_str):
-        """Send one Arduino command and receive its reply atomically."""
+        """Send one command and await its *matching* framed acknowledgement.
+
+        Motion commands may take much longer than an ordinary query. Never
+        treat a startup READY or a stale reply as motion completion.
+        """
         if not self.ser or not send_str:
             return None
 
+        timeouts = {
+            "ParkForLoading": 100.0,      # up to 60s Z and 15s per XY seek
+            "ReturnFromLoading": 45.0,
+            "HomeButton": 100.0,
+            "StartMachine": 100.0,
+        }
+        timeout = timeouts.get(send_str, 8.0)
+        if send_str.startswith("Sort,") or send_str.startswith("tray") or send_str == "RejectCard":
+            timeout = 100.0
+        expect, accept_ready = self._expected_arduino_reply(send_str)
+
         try:
             with self.serial_lock:
-                # Main.ino may leave a trailing <Arduino is ready> after the
-                # prior command.  Remove stale bytes before starting a new
-                # transaction so this caller reads only its own response.
                 try:
                     if self.ser.in_waiting:
                         self.ser.reset_input_buffer()
@@ -328,71 +372,92 @@ class OptimizedCardScanner:
                 self.ser.flush()
                 print(f"[->] Sent to Arduino: {send_str}")
 
-                # Hold the lock through the read so monitor, scan, and manual
-                # control threads cannot consume one another's responses.
-                resp = self.recv_from_arduino()
-                if resp:
-                    print(f"[<-] Arduino: {resp}")
+                response = self.recv_from_arduino(
+                    timeout_seconds=timeout,
+                    expected_prefix=expect,
+                    accept_ready=accept_ready,
+                )
+                if response:
+                    print(f"[<-] Arduino: {response}")
                 else:
-                    print(_elog('E406'))
-
-                return resp
+                    print(_elog('E406', f'{send_str}: no matching reply in {timeout:.0f}s'))
+                return response or None
         except Exception as e:
             print(_elog('E405', str(e)))
             return None
-    
-    def recv_from_arduino(self):
-        """Receive data from Arduino using start/end markers"""
+
+    def emergency_stop(self):
+        """Send STOP out of band while another thread awaits a park response.
+
+        This intentionally does NOT read from serial or acquire serial_lock;
+        the in-flight transaction owns the incoming reply stream.
+        """
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.write(b"StopMachine")
+                self.ser.flush()
+                return True
+        except Exception as e:
+            print(_elog('E405', f'emergency stop: {e}'))
+        return False
+
+    def recv_from_arduino(self, timeout_seconds=8.0,
+                          expected_prefix=None, accept_ready=True):
+        """Read complete <...> messages until the relevant acknowledgement."""
         if not self.ser:
             return ""
-        ck = ""
+        deadline = time.monotonic() + max(float(timeout_seconds), 0.1)
+        start_b, end_b = bytes([self.start_marker]), bytes([self.end_marker])
+        chars = []
         started = False
-        start_b = bytes([self.start_marker])
-        end_b = bytes([self.end_marker])
-
-        while True:
+        while time.monotonic() < deadline:
             b = self.ser.read(1)
             if not b:
-                # timeout or no data
-                break
-
-            if not started:
-                if b == start_b:
-                    started = True
-                # ignore until start marker
                 continue
+            if b == start_b:
+                started = True
+                chars = []
+                continue
+            if not started:
+                continue
+            if b != end_b:
+                if len(chars) >= 200:
+                    chars = []
+                    started = False
+                    continue
+                chars.append(b.decode('utf-8', errors='replace'))
+                continue
+            started = False
+            message = ''.join(chars).strip()
+            chars = []
+            if not message:
+                continue
+            if message.startswith("Error,"):
+                return message
+            if message == "Arduino is ready":
+                if accept_ready:
+                    return message
+                continue
+            if expected_prefix is None or message.startswith(expected_prefix):
+                return message
+            # Skip stale status, startup/info frames, and asynchronous notices.
+        return ""
 
-            # started == True
-            if b == end_b:
-                break
-
-            try:
-                ck += b.decode('utf-8', errors='replace')
-            except Exception:
-                # ignore decode errors
-                pass
-
-        return ck
-    
-    def wait_for_arduino(self, timeout=10):
-        """Wait for Arduino ready signal with a timeout (seconds). Returns True if ready, False on timeout."""
+    def wait_for_arduino(self, timeout=15):
+        """Wait for startup ready message, even if raw diagnostic lines precede it."""
         if not self.ser:
             return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = self.recv_from_arduino(
+                timeout_seconds=min(2.0, max(0.1, deadline - time.monotonic())),
+                expected_prefix="Arduino is ready", accept_ready=True)
+            if result == "Arduino is ready":
+                print("[<-] Arduino is ready")
+                return True
+        print(_elog('E404', 'startup banner absent; probing firmware directly'))
+        return False
 
-        deadline = time.time() + timeout
-        msg = ""
-        while "Arduino is ready" not in msg:
-            if time.time() > deadline:
-                print(_elog('E404'))
-                return False
-            if self.ser.in_waiting == 0:
-                time.sleep(0.05)
-                continue
-            msg = self.recv_from_arduino()
-            if msg:
-                print(f"[<-] Arduino: {msg}")
-        return True
-    
     # =====================================================================
     # SORTING & BIN ASSIGNMENT
     # =====================================================================
