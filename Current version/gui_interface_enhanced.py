@@ -3251,10 +3251,13 @@ class ScannerGUI:
                         card_info = None
 
             if not card_info:
+                if not self._sort_cycle_allowed_for_camera():
+                    self.log_status("Discarded rejected recognition: sorter paused")
+                    return
                 reason = reject_reason or 'Identification inconclusive'
                 self.detection_info = {'status': 'reject', 'message': reason, 'bin': 'RejectCard'}
                 self.log_status(f"⊗ Card sent to reject: {reason}", error=True)
-                if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
+                if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
                     self._send_arduino("RejectCard")
                 return
 
@@ -3297,9 +3300,12 @@ class ScannerGUI:
             if self.scanner.track_inventory:
                 card_info = self.scanner.check_inventory(card_info)
                 if card_info == "RejectCard":
+                    if not self._sort_cycle_allowed_for_camera():
+                        self.log_status("Discarded inventory rejection: sorter paused")
+                        return
                     self.detection_info = {'status': 'reject', 'message': 'In inventory', 'bin': 'RejectCard'}
                     self.log_status("⊗ Already in inventory")
-                    if getattr(self.scanner, 'ser', None) or (getattr(self, 'arduino_plugin', None) and self.arduino_plugin.is_connected()):
+                    if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
                         self._send_arduino("RejectCard")
                     return
             
