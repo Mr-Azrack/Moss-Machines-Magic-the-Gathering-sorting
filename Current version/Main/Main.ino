@@ -24,7 +24,7 @@
 #define EC_LOADING_POSITION   "E515"
 #define EC_Z_TRAVEL_HEIGHT     "E516"
 #define EC_LOADING_SEEK_FAIL    "E517"
-#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-3"
+#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-4"
 
 #define REPORT_ERROR(code, msg) \
   do { \
