@@ -2057,9 +2057,8 @@ class ScannerGUI:
     def toggle_auto_scan(self):
         """Toggle auto-scan mode"""
         self.auto_scan = self.auto_scan_var.get()
-        mode_text = "Auto-Scan Mode: ON" if self.auto_scan else "Manual Mode: ON"
-        self.scan_mode_label.config(text=mode_text, fg='#4CAF50' if self.auto_scan else '#2196F3')
-        self.log_status(f"Scan mode: {mode_text}")
+        self._refresh_scan_mode_label()
+        self.log_status(f"Scan mode: {'automatic' if self.auto_scan else 'manual'}")
     
     def toggle_inventory(self):
         """Toggle inventory tracking"""
@@ -2474,6 +2473,7 @@ class ScannerGUI:
             label, color, hint = "● STOPPED / AT PICKUP", '#fff', "LOAD CARDS → Z up + endstops → RETURN TO PICKUP → START"
         self.machine_state_label.configure(text=label, fg=color)
         self.loading_hint_label.configure(text=hint)
+        self._refresh_scan_mode_label()
 
     def toggle_motor(self, name):
         """Toggle motor/relay"""
@@ -2987,6 +2987,20 @@ class ScannerGUI:
         self.stop_btn.configure(state=tk.DISABLED)
         self.log_status("⏸ Camera stopped")
     
+    def _refresh_scan_mode_label(self):
+        """Make STOPPED ≠ 'Auto-Scan ON' visually explicit to operators."""
+        if not hasattr(self, 'scan_mode_label'):
+            return
+        if not self.auto_scan:
+            msg, color = "Manual Scan Mode", '#2196F3'
+        elif self._arduino_connected() and not self._sort_cycle_allowed_for_camera():
+            msg, color = "Auto-Scan: PAUSED (Machine Stopped/Loading)", '#FF9800'
+        elif self._arduino_connected():
+            msg, color = "Auto-Scan: SORTING ACTIVE", '#4CAF50'
+        else:
+            msg, color = "Auto-Scan: OFFLINE RECOGNITION", '#4CAF50'
+        self.scan_mode_label.configure(text=msg, fg=color)
+
     def _sort_cycle_allowed_for_camera(self):
         """No automatic scan, inventory write or tray command unless sorting is armed.
 
