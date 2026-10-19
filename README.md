@@ -218,43 +218,56 @@ tray. Then use a few inexpensive cards to verify that releasing from full
 height still lands cards in the intended bins without excessive bounce or
 drift. The software compile cannot prove physical card placement.
 
-### Loading Cards Safely (Current Version)
+### Loading Cards Safely — Real Endstop Parking (October 18, 2026)
 
-The pickup station and normal head home are the same position. **Never force cards
-under the pickup head.** The updated PC GUI and Arduino sketch implement an
-explicit loading clearance position instead of requiring manual jogging.
+**Use the GUI and firmware from the same latest commit.** Earlier
+`ParkForLoading` firmware parked at an arbitrary tray-grid position and did not
+verify endstops. It is not compatible with the revised GUI.
 
-1. Connect the Arduino. With an **empty** pickup area, click **HOME** if the
-   machine has not been homed since power-up or was manually jogged.
-2. Press **STOP** if the sorter is running. Wait for the current motion to end.
-3. Click **LOAD CARDS** in the camera view (or Arduino tab). The head moves
-   at fully raised Z to the already supported +3X/+2Y corner of the tray grid.
-4. **Wait for "LOADING POSITION"**, then load the card stack. Keep hands
-   away from the motion path.
-5. Remove hands and click **RETURN TO PICKUP**. It moves the exact inverse
-   XY displacement, without lowering Z or rehoming over the newly loaded cards.
-6. Wait for **READY TO START**, then press **START**. The Arduino skips its
-   ordinary homing descent for this one verified loading return.
+The pickup stack sits directly below the normal pickup/home location. The
+head now parks by physically seeking **Zmin (all the way UP), Ymin and Xmax**.
+Those are the same switches used by homing. The parking command **never**
+performs pickup, tray sorting, vacuum activation, or a Z descent.
 
-Firmware rejects loading moves when running, when its home is unknown, or
-when Z is not fully raised. It rejects START, HOME and calibration while parked.
-The GUI disables normal controls during loading and verifies the firmware's
-`parked`/`loadready` state before enabling START.
+1. With the hopper EMPTY and hands clear, connect the Arduino using the GUI.
+   It must display **"Arduino connected; endstop-loading firmware verified"**.
+   If it instead displays a firmware mismatch, flash the latest
+   `Current version/Main/Main.ino` to the Mega and reconnect. The GUI
+   deliberately refuses motion with older firmware.
+2. Click **HOME** if the machine is not homed. HOME seeks physical limits and
+   returns to normal pickup coordinates; this is **not** a loading action.
+3. Press **LOAD CARDS**. The head first raises to the Zmin limit, then goes
+   to the Ymin and Xmax limits. **No vacuum should start. No card should
+   be picked up.** The GUI accepts the park only when all three switches
+   are asserted. Wait for **PARKED AT ENDSTOPS**.
+4. Load your cards, keeping hands clear of the moving assembly.
+5. Click **RETURN TO PICKUP**. From Xmax/Ymin the head uses the exact
+   existing homing offsets (`Xcal*3+55`, `Ycal*2+38`) to move back to
+   pickup. Only after the XY return does Z lower the established 3000 steps
+   from Zmin to the normal raised travel/pickup height. Wait for READY.
+6. Press **START**. When the return is verified the firmware does not
+   repeat the full homing cycle over a loaded stack.
 
-**Deployment:** Update the desktop GUI **and flash**
-`Current version/Main/Main.ino` to the Arduino Mega. Updating GitHub or the
-desktop files does **not** automatically flash the machine. The new GUI requires
-the matching firmware status fields.
+**Connection behavior:** Serial reads now wait for the acknowledgement
+matching the command. A startup `<Arduino is ready>` frame is not a
+successful response to LOAD, and endstop moves have longer timeouts.
+The GUI uses the native scanner serial driver, not an optional Arduino
+plugin that may interpret commands differently. It checks
+`<Firmware,MOSS-ENDSTOP-PARK-3>` and requires the
+`parkmode=endstops3` sensor field.
 
-**Recovery:** If the board resets, USB communication fails during movement,
-or the head position becomes uncertain, **do not press START**. Clear the
-pickup area before manually recovering/home-calibrating the head. Physical
-limit switches do not encode a precise parked XY location across a reset.
+**Recovery and safety:** STOP is available during parking and homing.
+A failed or interrupted endstop seek invalidates the position and prevents
+sorting. **Empty the hopper before HOME** to recover. If USB communication
+fails mid-motion, use the hardware emergency stop and clear the area
+before any recovery. Never manually push the head into a limit switch.
 
-**First hardware check:** With no cards and a clear deck, verify HOME →
-LOAD CARDS → RETURN TO PICKUP, then STOP/START, and check that both the
-outbound and inverse travel are inside the machine's actual clearance envelope.
-Only then attempt a loaded batch. Never put hands in the machine while it moves.
+**Hardware acceptance test:** With no cards present, do HOME → LOAD CARDS
+→ RETURN TO PICKUP. Watch for Z-UP first, correct travel to both physical
+Xmax/Ymin switches, completely off vacuum, no downward pickup stroke,
+and precise return to the original position. Then verify the normal
+high-Z drop over a tray using a few low-value cards. The firmware compile
+and software tests cannot validate actual mechanical clearance or placement.
 
 ### Arduino Setup
 
