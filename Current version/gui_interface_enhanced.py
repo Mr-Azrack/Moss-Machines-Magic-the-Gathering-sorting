@@ -2283,6 +2283,24 @@ class ScannerGUI:
         self.log_status("→ " + command + " (Z raises to Zmin, then Xmax/Ymin; NO pickup)")
 
         def worker():
+            # Capture the true controller state BEFORE any park movement.
+            # If the head doesn't move, the operator needs to see which
+            # switch/home interlock refused the command, not an unrelated E507.
+            if command == "ParkForLoading":
+                try:
+                    before = str(self._send_arduino("QuerySensors") or "")
+                    fields = dict(
+                        item.split('=', 1) for item in before.split(',')
+                        if '=' in item
+                    )
+                    checks = ', '.join(
+                        f"{key}={fields.get(key, '?')}"
+                        for key in ("home", "started", "zmin", "ymin", "xmax", "recover")
+                    )
+                    self.root.after(0, lambda note=checks: self.log_status("LOAD precheck: " + note))
+                except Exception as error:
+                    self.root.after(0, lambda detail=str(error): self.log_status(
+                        "LOAD precheck unavailable: " + detail, error=True))
             try:
                 response = self._send_arduino(command)
             except Exception as exc:
@@ -2454,7 +2472,7 @@ class ScannerGUI:
         if not self._arduino_connected():
             label, color, hint = "● DISCONNECTED", '#ff4444', "Connect the Arduino before moving."
         elif not self._firmware_verified:
-            label, color, hint = "● WRONG FIRMWARE", '#ff4444', "Flash Main.ino with endstop-park protocol 3."
+            label, color, hint = "● WRONG FIRMWARE", '#ff4444', "Flash Main.ino with endstop-park protocol 4."
         elif uncertain:
             label, color, hint = "● POSITION UNKNOWN", '#ff4444', "Do not move or load until position is verified."
         elif busy:
