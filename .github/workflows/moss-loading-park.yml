@@ -9,12 +9,14 @@ on:
       - "Current version/tests/test_loading_park_gui.py"
       - "Current version/tests/test_endstop_park_firmware.py"
       - "Current version/tests/test_serial_motion_protocol.py"
+      - "Current version/tests/test_stopped_autoscan_safety.py"
       - "Current version/error_codes.py"
       - ".github/workflows/moss-loading-park.yml"
   push:
     branches:
       - "feature/card-loading-park-*"
       - "fix/moss-park-endstops-*"
+      - "fix/moss-auto-scan-paused-*"
 
 jobs:
   gui-syntax:
@@ -35,6 +37,8 @@ jobs:
         run: python -m unittest discover -s "Current version/tests" -p "test_endstop_park_firmware.py" -v
       - name: Serial protocol and timeout regression
         run: python -m unittest discover -s "Current version/tests" -p "test_serial_motion_protocol.py" -v
+      - name: Stopped machine auto-scan and endstop regression
+        run: python -m unittest discover -s "Current version/tests" -p "test_stopped_autoscan_safety.py" -v
   firmware-compile:
     runs-on: ubuntu-latest
     steps:
