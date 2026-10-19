@@ -2200,34 +2200,57 @@ class ScannerGUI:
         return False
 
     def _apply_loading_sensor_status(self, response):
-        """Reconcile UI state with firmware; never infer a successful move."""
-        normalized_response = str(response or '').strip().strip('<>')
-        if not normalized_response.startswith("Sensors,"):
+        """Accept only authoritative position data from the new endstop firmware."""
+        normalized = str(response or '').strip().strip('<>')
+        if not self._firmware_verified or not normalized.startswith("Sensors,"):
             return False
         parts = {}
-        for part in normalized_response.split(',')[1:]:
+        for part in normalized.split(',')[1:]:
             if '=' in part:
-                k, v = part.split('=', 1)
-                parts[k.strip()] = v.strip()
-        if 'parked' not in parts or 'started' not in parts or 'home' not in parts:
-            return False  # Firmware must support the loading interlock protocol.
+                key, val = part.split('=', 1)
+                parts[key.strip()] = val.strip()
+
+        # Older firmware has 'parked' too, but that refers to a tray-grid
+        # move and may still send an unintended pickup. Explicitly reject it.
+        required = {'home', 'parked', 'loadready', 'started',
+                    'parkmode', 'recover', 'xmin', 'xmax', 'ymin', 'zmin'}
+        if not required.issubset(parts) or parts['parkmode'] != 'endstops3':
+            return False
         try:
-            self.machine_started = int(parts['started']) == 1
-            self.machine_parked_for_loading = int(parts['parked']) == 1
-            self.loading_return_ready = int(parts.get('loadready', 0)) == 1
-            self.sensor_data['home'] = int(parts['home'])
-            self.sensor_data['parked'] = int(parts['parked'])
-            self.sensor_data['loadready'] = int(parts.get('loadready', 0))
-            self.sensor_data['started'] = int(parts['started'])
-            self._loading_position_uncertain = False
+            started = int(parts['started']) == 1
+            parked = int(parts['parked']) == 1
+            ready = int(parts['loadready']) == 1
+            home = int(parts['home']) == 1
+            recovery = int(parts['recover']) == 1
+            # LOW means switch triggered in current firmware.
+            if parked and (int(parts['zmin']) != 0 or
+                           int(parts['xmax']) != 0 or int(parts['ymin']) != 0):
+                return False
+            if parked and (started or ready or home):
+                return False
+            if ready and not home:
+                return False
+            if recovery and (ready or parked or started):
+                return False
         except (TypeError, ValueError):
             return False
+
+        self.machine_started = started
+        self.machine_parked_for_loading = parked
+        self.loading_return_ready = ready
+        self._loading_recovery_required = recovery
+        self.sensor_data['home'] = int(home)
+        self.sensor_data['parked'] = int(parked)
+        self.sensor_data['loadready'] = int(ready)
+        self.sensor_data['started'] = int(started)
+        self.sensor_data['recover'] = int(recovery)
+        self._loading_position_uncertain = False
         self._update_controls_state()
         return True
 
     def _sync_loading_status(self):
         """Fetch firmware-confirmed location after connection or uncertain reply."""
-        if not self._arduino_connected():
+        if not self._arduino_connected() or not self._firmware_verified:
             return False
         try:
             result = self._send_arduino("QuerySensors")
@@ -2244,18 +2267,21 @@ class ScannerGUI:
     def _loading_move(self, command):
         """Send a state-checked head move off the Tk main thread."""
         if (self.machine_started or self._loading_motion_active or
-                self._loading_position_uncertain or not self._arduino_connected() or
+                self._loading_position_uncertain or self._loading_recovery_required or
+                not self._firmware_verified or not self._arduino_connected() or
                 getattr(self, '_scan_in_progress', False)):
             self.log_status("Stop scanning, connect Arduino, and verify position first", error=True)
             return
-        if command == "ParkForLoading" and self.machine_parked_for_loading:
+        if command == "ParkForLoading" and (
+                self.machine_parked_for_loading or not self.sensor_data.get('home')):
+            self.log_status("Home an empty machine before parking; remove all cards first", error=True)
             return
         if command == "ReturnFromLoading" and not self.machine_parked_for_loading:
             return
 
         self._loading_motion_active = True
         self._update_controls_state()
-        self.log_status("→ " + command + " (keep hands clear while moving)")
+        self.log_status("→ " + command + " (Z raises to Zmin, then Xmax/Ymin; NO pickup)")
 
         def worker():
             try:
@@ -2267,11 +2293,18 @@ class ScannerGUI:
             # Query firmware even after errors, so a lost OK cannot mistakenly
             # leave START enabled while the head is still parked.
             sensor_reply = None
-            try:
-                if self._arduino_connected():
-                    sensor_reply = self._send_arduino("QuerySensors")
-            except Exception:
-                pass
+            # A missing motion acknowledgement means the physical state is
+            # UNKNOWN. Do not queue QuerySensors while firmware may still be
+            # seeking a limit (a stale ACK was the old disconnect symptom).
+            if response and (
+                "OK,LoadingParked" in str(response) or
+                "OK,LoadingReady" in str(response) or
+                str(response).startswith("Error,")):
+                try:
+                    if self._arduino_connected():
+                        sensor_reply = self._send_arduino("QuerySensors")
+                except Exception:
+                    pass
 
             def completed():
                 self._loading_motion_active = False
@@ -2288,7 +2321,7 @@ class ScannerGUI:
                         pass
                 if command_ok and status_ok:
                     if command == "ParkForLoading" and self.machine_parked_for_loading:
-                        self.log_status("✓ Head clear. Load cards; then click RETURN TO PICKUP.")
+                        self.log_status("✓ Zmin/Xmax/Ymin confirmed. Load cards; then RETURN TO PICKUP.")
                     elif command == "ReturnFromLoading" and self.loading_return_ready:
                         self.log_status("✓ Back at pickup. Clear hands and press START.")
                     else:
@@ -2357,45 +2390,55 @@ class ScannerGUI:
             if response: self._handle_arduino_response(response, "StopMachine")
 
     def _update_controls_state(self):
-        """Loading motion is isolated from normal start, home and jogging."""
+        """Never enable motion controls without validated firmware and location."""
+        connected = self._arduino_connected() and self._firmware_verified
         busy = self._loading_motion_active
         parked = self.machine_parked_for_loading
         uncertain = self._loading_position_uncertain
-        connected = self._arduino_connected()
-        manual_allowed = connected and not (self.machine_started or parked or busy or uncertain)
-        state = tk.NORMAL if manual_allowed else tk.DISABLED
+        recovery = self._loading_recovery_required
+        active = self.machine_started
+        homed = bool(self.sensor_data.get('home'))
 
-        self.home_btn.configure(state=state)
+        can_home = connected and not (busy or parked or uncertain or active)
+        can_manual = can_home and not recovery
+        can_park = can_manual and homed and not getattr(self, '_scan_in_progress', False)
+        can_return = connected and parked and not (busy or uncertain or active or recovery)
+        can_start = connected and homed and not (busy or parked or uncertain or active or recovery)
+        self.home_btn.configure(state=tk.NORMAL if can_home else tk.DISABLED)
         for checkbox in self.motor_checkboxes.values():
-            checkbox.configure(state=state)
+            checkbox.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
         for button in self.movement_buttons:
-            button.configure(state=state)
-        self.upload_params_btn.configure(state=state)
-        self.fetch_params_btn.configure(state=state)
-
-        can_park = manual_allowed and not getattr(self, '_scan_in_progress', False)
+            button.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
+        self.upload_params_btn.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
+        self.fetch_params_btn.configure(state=tk.NORMAL if can_manual else tk.DISABLED)
         self.load_cards_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
         self.camera_load_btn.configure(state=tk.NORMAL if can_park else tk.DISABLED)
-        can_return = connected and parked and not (self.machine_started or busy or uncertain)
         self.return_from_loading_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
         self.camera_return_btn.configure(state=tk.NORMAL if can_return else tk.DISABLED)
-        self.start_machine_btn.configure(
-            state=tk.NORMAL if connected and not (self.machine_started or parked or busy or uncertain) else tk.DISABLED)
-        self.stop_machine_btn.configure(
-            state=tk.NORMAL if connected and self.machine_started and not busy else tk.DISABLED)
+        self.start_machine_btn.configure(state=tk.NORMAL if can_start else tk.DISABLED)
+        # STOP remains available DURING a park move (out-of-band serial).
+        self.stop_machine_btn.configure(state=tk.NORMAL if connected and (active or busy) else tk.DISABLED)
 
-        if uncertain:
-            label, color, hint = "● POSITION UNKNOWN", '#ff4444', "Do not load/start; reconnect and verify position."
+        if not self._arduino_connected():
+            label, color, hint = "● DISCONNECTED", '#ff4444', "Connect the Arduino before moving."
+        elif not self._firmware_verified:
+            label, color, hint = "● WRONG FIRMWARE", '#ff4444', "Flash Main.ino with endstop-park protocol 3."
+        elif uncertain:
+            label, color, hint = "● POSITION UNKNOWN", '#ff4444', "Do not move or load until position is verified."
         elif busy:
-            label, color, hint = "● HEAD MOVING", '#FFA726', "Keep hands clear during movement."
+            label, color, hint = "● MOVING — KEEP CLEAR", '#FFA726', "STOP can interrupt. Keep hands away."
+        elif recovery:
+            label, color, hint = "● RECOVERY REQUIRED", '#ff4444', "EMPTY THE HOPPER; then HOME to recover."
         elif parked:
-            label, color, hint = "● LOADING POSITION", '#FFA726', "Load cards now, then click RETURN TO PICKUP."
-        elif self.machine_started:
+            label, color, hint = "● PARKED AT ENDSTOPS", '#FFA726', "Zmin, Xmax, Ymin triggered. Load cards; then RETURN."
+        elif active:
             label, color, hint = "● STARTED", '#44ff44', "Sorting enabled."
         elif self.loading_return_ready:
-            label, color, hint = "● READY TO START", '#44ff44', "Clear hands and click START."
+            label, color, hint = "● READY TO START", '#44ff44', "Returned to pickup; clear hands and START."
+        elif not homed:
+            label, color, hint = "● NOT HOMED", '#FFA726', "Empty hopper before HOME."
         else:
-            label, color, hint = "● STOPPED", '#ff4444', "STOP → LOAD CARDS → place stack → RETURN TO PICKUP → START"
+            label, color, hint = "● STOPPED / AT PICKUP", '#fff', "LOAD CARDS → Z up + endstops → RETURN TO PICKUP → START"
         self.machine_state_label.configure(text=label, fg=color)
         self.loading_hint_label.configure(text=hint)
 
