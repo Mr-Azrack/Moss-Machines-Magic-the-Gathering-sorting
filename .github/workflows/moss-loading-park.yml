@@ -5,11 +5,16 @@ on:
     paths:
       - "Current version/Main/Main.ino"
       - "Current version/gui_interface_enhanced.py"
+      - "Current version/optimized_scanner.py"
+      - "Current version/tests/test_loading_park_gui.py"
+      - "Current version/tests/test_endstop_park_firmware.py"
+      - "Current version/tests/test_serial_motion_protocol.py"
       - "Current version/error_codes.py"
       - ".github/workflows/moss-loading-park.yml"
   push:
     branches:
       - "feature/card-loading-park-*"
+      - "fix/moss-park-endstops-*"
 
 jobs:
   gui-syntax:
@@ -21,11 +26,15 @@ jobs:
           python-version: "3.11"
       - name: Compile UI and error-code modules
         run: |
-          python -m py_compile "Current version/gui_interface_enhanced.py" "Current version/error_codes.py"
+          python -m py_compile "Current version/gui_interface_enhanced.py" "Current version/optimized_scanner.py" "Current version/error_codes.py"
       - name: Verify loading-state GUI interlocks
         run: python -m unittest discover -s "Current version/tests" -p "test_loading_park_gui.py" -v
       - name: Verify full-height card release path
         run: python -m unittest discover -s "Current version/tests" -p "test_full_height_drop.py" -v
+      - name: Endstop park must not run pickup/sort routines
+        run: python -m unittest discover -s "Current version/tests" -p "test_endstop_park_firmware.py" -v
+      - name: Serial protocol and timeout regression
+        run: python -m unittest discover -s "Current version/tests" -p "test_serial_motion_protocol.py" -v
   firmware-compile:
     runs-on: ubuntu-latest
     steps:
