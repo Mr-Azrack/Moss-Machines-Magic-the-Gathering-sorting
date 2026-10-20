@@ -24,7 +24,7 @@
 #define EC_LOADING_POSITION   "E515"
 #define EC_Z_TRAVEL_HEIGHT     "E516"
 #define EC_LOADING_SEEK_FAIL    "E517"
-#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-4"
+#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-5"
 
 #define REPORT_ERROR(code, msg) \
   do { \
@@ -286,14 +286,10 @@ boolean releaseCardAtTravelHeight() {
   }
 
   // Vacuum2 remains unused by the automatic sort cycle.
+  // Keep all stepper drivers energized while the vacuum releases. Briefly
+  // disabling the gantry at an outer tray can let an axis lose position.
   stopVacuumCarryPulse();
   if (!delayWithStop(100)) return false;
-
-  MotorsOnOff(1);
-  // Always restore driver power, even if STOP arrives during the pulse.
-  boolean pulseCompleted = delayWithStop(100);
-  MotorsOnOff(0);
-  if (!pulseCompleted) return false;
 
   return delayWithStop(DROP_SETTLE_MS);
 }
@@ -338,6 +334,16 @@ boolean pick(long steps) {
   REPORT_ERROR(EC_PICKUP_RETRY, "3 retries failed");
   PrintLCD("E505 Pickup", "Cycle stopped");
   return false;
+}
+
+boolean moveFromEndstopsToPickupXY() {
+  // Precision/recovery move: return one axis at a time so the faster travel
+  // timing does not load both XY pairs simultaneously while establishing the
+  // calibrated pickup origin.
+  Move4(1, 0, Xcal * 3 + 55, 0);
+  if (abortRequested) return false;
+  Move4(1, 0, 0, Ycal * 2 + 38);
+  return !abortRequested;
 }
 
 void homingFailure(const char* reason, const char* code) {
@@ -406,8 +412,9 @@ void Homemachine() {
   Move1(0, PICKUP_Z_FROM_LIMIT_STEPS, zspeed);
   if (abortRequested) { homingFailure("Z interrupted", EC_LOADING_SEEK_FAIL); return; }
   delay(200);
-  Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38);
-  if (abortRequested) { homingFailure("XY interrupted", EC_LOADING_SEEK_FAIL); return; }
+  if (!moveFromEndstopsToPickupXY()) {
+    homingFailure("XY interrupted", EC_LOADING_SEEK_FAIL); return;
+  }
   delay(200);
   zPositionSteps = 0;
   loadingMotionActive = false;
@@ -537,8 +544,9 @@ void ReturnFromLoading() {
 
   // From physical Xmax/Ymin, use precisely the offset of Homemachine().
   // Move in XY at full Z clearance; lower to pickup travel height last.
-  Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38);
-  if (abortRequested) { loadingSeekFailure("XY interrupted"); return; }
+  if (!moveFromEndstopsToPickupXY()) {
+    loadingSeekFailure("XY interrupted"); return;
+  }
   Move1(0, PICKUP_Z_FROM_LIMIT_STEPS, zspeed);
   if (abortRequested || zPositionSteps != 0) {
     loadingSeekFailure("Z return fail"); return;
@@ -923,8 +931,17 @@ void Tray(short var) {
 
   int moveBackDirectionX = (x >= 0) ? 0 : 1;
   int moveBackDirectionY = (y >= 0) ? 1 : 0;
-  Move4(moveBackDirectionX, moveBackDirectionY, absX, absY);
-  if (abortRequested) return;
+  // Return to pickup one axis at a time. The outward tray move remains
+  // simultaneous for speed; the precision return gives X and Y their own
+  // motion window so neither axis can be lost under combined load.
+  if (absX > 0) {
+    Move4(moveBackDirectionX, moveBackDirectionY, absX, 0);
+    if (abortRequested) return;
+  }
+  if (absY > 0) {
+    Move4(moveBackDirectionX, moveBackDirectionY, 0, absY);
+    if (abortRequested) return;
+  }
 
   // Z has remained at full travel height throughout tray release.
   // No Z correction is required before returning to pickup.
