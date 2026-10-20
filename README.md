@@ -275,7 +275,7 @@ matching the command. A startup `<Arduino is ready>` frame is not a
 successful response to LOAD, and endstop moves have longer timeouts.
 The GUI uses the native scanner serial driver, not an optional Arduino
 plugin that may interpret commands differently. It checks
-`<Firmware,MOSS-ENDSTOP-PARK-4>` and requires the
+`<Firmware,MOSS-ENDSTOP-PARK-5>` and requires the
 `parkmode=endstops3` sensor field.
 
 **Recovery and safety:** STOP is available during parking and homing.
