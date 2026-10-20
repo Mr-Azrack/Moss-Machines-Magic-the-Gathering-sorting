@@ -41,6 +41,9 @@ _CONTROL_COMMANDS = {
     "StartMachine",
     "StopMachine",
     "HomeButton",
+    "ParkForLoading",
+    "ReturnFromLoading",
+    "QueryFirmware",
     "QuerySensors",
     "QueryParams",
 }
@@ -694,7 +697,9 @@ class ScannerGUI(BaseScannerGUI):
         # not falsely report a timeout while the machine is still moving.
         serial_obj = None
         old_timeout = None
-        if wire_cmd.startswith("Sort,") or wire_cmd in ("StartMachine", "HomeButton"):
+        if wire_cmd.startswith("Sort,") or wire_cmd in (
+            "StartMachine", "HomeButton", "ParkForLoading", "ReturnFromLoading"
+        ):
             try:
                 serial_obj = getattr(self.scanner, "ser", None)
                 if serial_obj is not None:
