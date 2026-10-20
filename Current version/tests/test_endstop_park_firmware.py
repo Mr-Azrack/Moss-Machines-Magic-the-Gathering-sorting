@@ -41,7 +41,7 @@ class EndstopParkingSafety(unittest.TestCase):
 
     def test_return_uses_homing_offsets_and_z_descends_last(self):
         body = section('void ReturnFromLoading() {', '\nvoid StopMachine() {')
-        xy = body.index('Move4(1, 0, Xcal * 3 + 55, Ycal * 2 + 38)')
+        xy = body.index('moveFromEndstopsToPickupXY()')
         z = body.index('Move1(0, PICKUP_Z_FROM_LIMIT_STEPS, zspeed)')
         ready = body.index('loadingReturnReady = true;')
         self.assertLess(xy, z)
@@ -50,8 +50,14 @@ class EndstopParkingSafety(unittest.TestCase):
         self.assertNotIn('pick(', body)
         self.assertNotIn('Vacuum1, HIGH', body)
 
+    def test_precision_recenter_splits_x_then_y(self):
+        body = section('boolean moveFromEndstopsToPickupXY() {', '\nvoid homingFailure(')
+        x = body.index('Move4(1, 0, Xcal * 3 + 55, 0)')
+        y = body.index('Move4(1, 0, 0, Ycal * 2 + 38)')
+        self.assertLess(x, y)
+
     def test_firmware_version_lets_gui_block_previous_firmware(self):
-        self.assertIn('#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-4"', source)
+        self.assertIn('#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-5"', source)
         self.assertIn('if (Tempval1 == "QueryFirmware")', source)
         self.assertIn('response += ",parkmode=endstops3"', source)
         self.assertIn('response += ",recover="', source)
