@@ -28,8 +28,6 @@ class FullHeightDropTests(unittest.TestCase):
         actions = [
             'stopVacuumCarryPulse()',
             'delayWithStop(100)',
-            'MotorsOnOff(1)',
-            'MotorsOnOff(0)',
             'delayWithStop(DROP_SETTLE_MS)',
         ]
         last = -1
@@ -38,6 +36,7 @@ class FullHeightDropTests(unittest.TestCase):
                 pos = release.index(action)
                 self.assertGreater(pos, last)
                 last = pos
+        self.assertNotIn('MotorsOnOff(', release)
 
     def test_pickup_retains_normal_depth_control(self):
         pickup = body_between('boolean pick(long steps)', '\nvoid Homemachine()')
@@ -51,11 +50,15 @@ class FullHeightDropTests(unittest.TestCase):
         height_check = tray.index('if (zPositionSteps != 0)', lift)
         xy = tray.index('Move4(moveToDirectionX, moveToDirectionY', height_check)
         release = tray.index('releaseCardAtTravelHeight()', xy)
-        xy_return = tray.index('Move4(moveBackDirectionX, moveBackDirectionY', release)
+        x_return = tray.index(
+            'Move4(moveBackDirectionX, moveBackDirectionY, absX, 0)', release)
+        y_return = tray.index(
+            'Move4(moveBackDirectionX, moveBackDirectionY, 0, absY)', x_return)
         self.assertLess(lift, height_check)
         self.assertLess(height_check, xy)
         self.assertLess(xy, release)
-        self.assertLess(release, xy_return)
+        self.assertLess(release, x_return)
+        self.assertLess(x_return, y_return)
         self.assertNotIn('Move1(', tray[xy:])
 
     def test_obsolete_drop_distance_removed(self):
