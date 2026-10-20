@@ -6,6 +6,8 @@ import time
 import unittest
 
 path = Path(__file__).resolve().parents[1] / 'optimized_scanner.py'
+wrapper_path = Path(__file__).resolve().parents[1] / 'sorter_gui_main.py'
+wrapper_source = wrapper_path.read_text(encoding='utf-8')
 tree = ast.parse(path.read_text(encoding='utf-8'))
 cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OptimizedCardScanner")
 names = {'_expected_arduino_reply', 'send_to_arduino', 'recv_from_arduino',
@@ -55,6 +57,15 @@ class Harness:
 
 
 class SerialProtocolTests(unittest.TestCase):
+    def test_loading_commands_are_control_commands_not_sort_values(self):
+        control_block = wrapper_source[
+            wrapper_source.index('_CONTROL_COMMANDS = {'):
+            wrapper_source.index('_CONTROL_PREFIXES = (')
+        ]
+        self.assertIn('"ParkForLoading"', control_block)
+        self.assertIn('"ReturnFromLoading"', control_block)
+        self.assertIn('"QueryFirmware"', control_block)
+
     def test_park_waits_for_real_park_ack_not_startup_ready(self):
         h = Harness(b'<Arduino is ready><OK,LoadingParked>')
         self.assertEqual(h.send_to_arduino('ParkForLoading'), 'OK,LoadingParked')
@@ -70,9 +81,9 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertEqual(h.send_to_arduino('ParkForLoading'), 'Error,E517,X timeout')
 
     def test_firmware_probe_requires_specific_identity_frame(self):
-        h = Harness(b'<Arduino is ready><Firmware,MOSS-ENDSTOP-PARK-4>')
+        h = Harness(b'<Arduino is ready><Firmware,MOSS-ENDSTOP-PARK-5>')
         self.assertEqual(h.send_to_arduino('QueryFirmware'),
-                         'Firmware,MOSS-ENDSTOP-PARK-4')
+                         'Firmware,MOSS-ENDSTOP-PARK-5')
 
     def test_emergency_stop_does_not_wait_on_command_lock(self):
         h = Harness()
