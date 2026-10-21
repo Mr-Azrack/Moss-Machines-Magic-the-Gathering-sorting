@@ -57,15 +57,25 @@ class EndstopParkingSafety(unittest.TestCase):
         self.assertLess(x, y)
 
     def test_firmware_version_lets_gui_block_previous_firmware(self):
-        self.assertIn('#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-5"', source)
+        self.assertIn('#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-6"', source)
         self.assertIn('if (Tempval1 == "QueryFirmware")', source)
         self.assertIn('response += ",parkmode=endstops3"', source)
         self.assertIn('response += ",recover="', source)
 
-    def test_unknown_sort_commands_no_longer_pickup_any_card(self):
+    def test_generic_sort_values_use_dynamic_trays_but_keep_reserved_bins_safe(self):
         body = section('if (sortCommand) {', '\n  long manualSteps = 5;')
-        self.assertIn('EC_UNKNOWN_CMD', body)
+        self.assertIn('ForLoop(1, 32)', body)
         self.assertNotIn('ForLoop(1, 34)', body)
+        self.assertIn('isReservedSortValue(Tempval1)', body)
+        self.assertIn('EC_UNKNOWN_CMD', body)
+
+    def test_reserved_control_names_cannot_be_dynamic_sort_values(self):
+        body = section('boolean isReservedSortValue(', '\nvoid DetermineAction() {')
+        for reserved in ('StartMachine', 'StopMachine', 'HomeButton',
+                         'ParkForLoading', 'ReturnFromLoading',
+                         'QueryFirmware', 'QuerySensors'):
+            with self.subTest(reserved=reserved):
+                self.assertIn(f'value == "{reserved}"', body)
 
     def test_homing_and_park_move_have_interrupt_checks(self):
         self.assertIn('machineStarted || loadingMotionActive', source)
