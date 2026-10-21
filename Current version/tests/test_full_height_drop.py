@@ -48,18 +48,22 @@ class FullHeightDropTests(unittest.TestCase):
         tray = body_between('void Tray(short var)', '\nvoid Move4(')
         lift = tray.index('Move1(1, CARRY_CLEARANCE_STEPS, zespeed)')
         height_check = tray.index('if (zPositionSteps != 0)', lift)
-        xy = tray.index('Move4(moveToDirectionX, moveToDirectionY', height_check)
-        release = tray.index('releaseCardAtTravelHeight()', xy)
+        x_out = tray.index(
+            'Move4(moveToDirectionX, moveToDirectionY, absX, 0)', height_check)
+        y_out = tray.index(
+            'Move4(moveToDirectionX, moveToDirectionY, 0, absY)', x_out)
+        release = tray.index('releaseCardAtTravelHeight()', y_out)
         x_return = tray.index(
             'Move4(moveBackDirectionX, moveBackDirectionY, absX, 0)', release)
         y_return = tray.index(
             'Move4(moveBackDirectionX, moveBackDirectionY, 0, absY)', x_return)
         self.assertLess(lift, height_check)
-        self.assertLess(height_check, xy)
-        self.assertLess(xy, release)
+        self.assertLess(height_check, x_out)
+        self.assertLess(x_out, y_out)
+        self.assertLess(y_out, release)
         self.assertLess(release, x_return)
         self.assertLess(x_return, y_return)
-        self.assertNotIn('Move1(', tray[xy:])
+        self.assertNotIn('Move1(', tray[x_out:])
 
     def test_obsolete_drop_distance_removed(self):
         self.assertNotIn('initial_drop_distance', source)
