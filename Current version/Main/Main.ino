@@ -24,7 +24,7 @@
 #define EC_LOADING_POSITION   "E515"
 #define EC_Z_TRAVEL_HEIGHT     "E516"
 #define EC_LOADING_SEEK_FAIL    "E517"
-#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-5"
+#define FIRMWARE_ID             "MOSS-ENDSTOP-PARK-6"
 
 #define REPORT_ERROR(code, msg) \
   do { \
@@ -584,6 +584,21 @@ void MotorsOnOff(boolean OnOff) {
   digitalWrite(Zenable, OnOff);
 }
 
+boolean isReservedSortValue(const String &value) {
+  return value == "StartMachine" ||
+         value == "StopMachine" ||
+         value == "HomeButton" ||
+         value == "ParkForLoading" ||
+         value == "ReturnFromLoading" ||
+         value == "QueryFirmware" ||
+         value == "QuerySensors" ||
+         value == "QueryParams" ||
+         value == "OverflowTray" ||
+         value.startsWith("SetMotor,") ||
+         value.startsWith("SetParam,") ||
+         value.startsWith("Calibrate");
+}
+
 void DetermineAction() {
   boolean sortCommand = false;
   if (Tempval1.startsWith("Sort,")) {
@@ -615,8 +630,21 @@ void DetermineAction() {
       }
     }
 
-    // An unrecognized Sort command must never fall back to a pickup.
-    REPORT_ERROR(EC_UNKNOWN_CMD, "Unknown sort");
+    // Generic sort values such as Blue, FDN, Creature, A, Common, etc.
+    // are assigned to the next available physical tray. This is the original
+    // sorter behavior and is required for all non-price sorting modes.
+    //
+    // Only explicit Sort,<value> commands may use this dynamic assignment,
+    // and control-command names are rejected so a GUI framing bug can never
+    // turn HOME/LOAD/STOP into a pickup cycle.
+    if (isReservedSortValue(Tempval1)) {
+      REPORT_ERROR(EC_UNKNOWN_CMD, "Reserved sort");
+      return;
+    }
+
+    atHomePosition = false;
+    ForLoop(1, 32);  // Keep tray 33 = reject and tray 34 = overflow reserved.
+    if (!abortRequested) atHomePosition = true;
     return;
   }
 
@@ -922,8 +950,19 @@ void Tray(short var) {
   int absY = abs(Ycal * y);
   int moveToDirectionX = (x >= 0) ? 1 : 0;
   int moveToDirectionY = (y >= 0) ? 0 : 1;
-  Move4(moveToDirectionX, moveToDirectionY, absX, absY);
-  if (abortRequested) return;
+
+  // Move to the tray one axis at a time at the current travel speed. The
+  // reject-bin test showed that driving both XY motor pairs simultaneously at
+  // the faster setting could miss steps, stop between bins, and then make the
+  // full return overshoot the pickup origin.
+  if (absX > 0) {
+    Move4(moveToDirectionX, moveToDirectionY, absX, 0);
+    if (abortRequested) return;
+  }
+  if (absY > 0) {
+    Move4(moveToDirectionX, moveToDirectionY, 0, absY);
+    if (abortRequested) return;
+  }
 
   // Release at the existing raised travel height; no downward drop stroke.
   if (!releaseCardAtTravelHeight()) return;
@@ -931,9 +970,8 @@ void Tray(short var) {
 
   int moveBackDirectionX = (x >= 0) ? 0 : 1;
   int moveBackDirectionY = (y >= 0) ? 1 : 0;
-  // Return to pickup one axis at a time. The outward tray move remains
-  // simultaneous for speed; the precision return gives X and Y their own
-  // motion window so neither axis can be lost under combined load.
+  // Return to pickup one axis at a time as the exact inverse of the outbound
+  // move so both legs use the same motor loading and step geometry.
   if (absX > 0) {
     Move4(moveBackDirectionX, moveBackDirectionY, absX, 0);
     if (abortRequested) return;
