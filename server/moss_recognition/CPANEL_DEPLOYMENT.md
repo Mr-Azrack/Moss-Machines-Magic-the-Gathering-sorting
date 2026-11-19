@@ -27,3 +27,31 @@ This is a **standalone** service. Do not copy files into the sorter PC or replac
 - Existing sites, sorter Python files, and Arduino firmware remain unchanged.
 
 More detail: [README.md](README.md).
+
+## Catalog matcher pilot
+
+The existing Passenger app exposes authenticated `POST /api/v1/recognize`.
+Send `{"game":"magic","algorithm":"moss-rgb-phash-256","rgb_phash":[r,g,b]}`
+with the three 64-digit hex values from the MOSS RGB pHash scanner and the existing
+`X-MOSS-API-Key` header. Add a lowercase `set` only when the physical set is
+known. Responses include the candidate and runner-up distances, catalog scope,
+version, and `advisory_only: true`. HTTP 503 means there is no usable catalog.
+The endpoint neither stores a scan nor makes upstream requests during matching.
+
+Run the catalog refresh with the app's virtualenv Python. The app and cron must
+use the same private data directory.
+
+```sh
+/home/thegamestationlw/virtualenv/moss_recognition/3.12/bin/python \
+  /home/thegamestationlw/moss_recognition/refresh_catalog.py \
+  --data-dir /home/thegamestationlw/moss_private_data --sets fdn:23556,dft
+```
+
+Install that command in cPanel Cron Jobs once a day. The pilot searches two
+sets. It uses a few Scryfall search pages per set, supplements Foundations with
+the TCGTracking set feed, and calculates fingerprints only for image URLs absent
+from the last snapshot. The daily refresh uses an exclusive lock and publishes
+via atomic replacement. A failed refresh leaves the last usable index available.
+Use Scryfall's compressed Default Cards bulk manifest for a future full-game
+rollout. The pilot is advisory because a missing out-of-set reprint can change
+the match decision.

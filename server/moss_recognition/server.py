@@ -26,7 +26,9 @@ from urllib.parse import parse_qs, quote
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-VERSION = "0.1.0"
+from catalog_match import ALGORITHM, CatalogIndex, parse_hashes
+
+VERSION = "0.2.0"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_BYTES = 3 * 1024 * 1024
 MAX_PIXELS = 9_000_000
@@ -139,6 +141,7 @@ class RecognitionApp:
         self.image_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "moss_recognition.db"
         self._init_db()
+        self.catalog = CatalogIndex(self.data_dir / "catalog-index.json")
 
     @contextmanager
     def _connect(self):
@@ -350,6 +353,29 @@ class RecognitionApp:
             raise
         return self._json(start_response, 201, dict(base, scan_id=sid, state="pending"))
 
+    def _recognize_catalog(self, environ, start_response):
+        try:
+            length = int(environ.get("CONTENT_LENGTH", ""))
+        except (TypeError, ValueError):
+            length = 0
+        if length > 4096:
+            raise RequestError(413, "invalid_length", "fingerprint payload exceeds size limit")
+        body = self._json_body(environ)
+        if body.get("game") != "magic" or body.get("algorithm") != ALGORITHM:
+            raise RequestError(400, "unsupported_fingerprint", "expected Magic and the MOSS RGB pHash algorithm")
+        set_code = body.get("set")
+        if set_code is not None and (not isinstance(set_code, str) or not re.fullmatch(r"[a-z0-9]{2,8}", set_code)):
+            raise RequestError(400, "invalid_set", "expected a lowercase set code")
+        try:
+            hashes = parse_hashes(body.get("rgb_phash"))
+        except ValueError as exc:
+            raise RequestError(400, "invalid_fingerprint", str(exc)) from exc
+        try:
+            result = self.catalog.match(hashes, set_code)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RequestError(503, "catalog_unavailable", "recognition catalog is unavailable") from exc
+        return self._json(start_response, 200, result)
+
     def _scan_status(self, sid, start_response):
         with self._connect() as db:
             scan = db.execute("SELECT id,created_at,device_id,state,verified_product_id,verified_name,verified_set,verified_number,reviewed_at FROM scans WHERE id=?", (sid,)).fetchone()
@@ -515,6 +541,8 @@ class RecognitionApp:
                     raise RequestError(401, "unauthorized", "valid X-MOSS-API-Key required")
                 if path == "/api/v1/scans" and method == "POST":
                     return self._ingest(environ, start_response, True)
+                if path == "/api/v1/recognize" and method == "POST":
+                    return self._recognize_catalog(environ, start_response)
                 if path == "/api/v1/match" and method == "POST":
                     return self._ingest(environ, start_response, False)
                 if path == "/api/v1/metrics" and method == "GET":
