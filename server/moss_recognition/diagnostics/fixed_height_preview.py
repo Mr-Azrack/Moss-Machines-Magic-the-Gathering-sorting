@@ -8,7 +8,7 @@ import time
 import cv2
 from PIL import Image, ImageTk
 
-from capture_evidence import FOUNDATIONS, padded_from_raw, save_image
+from capture_evidence import FOUNDATIONS, outer_border_crop, padded_card, save_image
 
 ROTATIONS = {
     '90° clockwise': cv2.ROTATE_90_CLOCKWISE,
@@ -20,6 +20,17 @@ ROTATIONS = {
 def upright(frame, orientation):
     transform = ROTATIONS[orientation]
     return frame if transform is None else cv2.rotate(frame, transform)
+
+
+class SidewaysCard(ValueError):
+    """The visible card contour needs a quarter-turn before rectification."""
+
+
+def crop_upright(frame, contour):
+    _, _, width, height = cv2.boundingRect(contour)
+    if width >= height:
+        raise SidewaysCard
+    return padded_card(frame, contour)
 
 
 class Preview:
@@ -68,7 +79,9 @@ class Preview:
         if frame is None:
             return None, 'Waiting for a camera frame'
         try:
-            evidence = padded_from_raw(frame)
+            evidence = outer_border_crop(frame, crop_upright)
+        except SidewaysCard:
+            return None, 'Choose a rotation that makes the card upright.'
         except ValueError:
             return None, 'The card is too close to the edge for a full 2 mm margin'
         if evidence is None:
