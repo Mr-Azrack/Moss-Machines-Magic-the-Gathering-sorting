@@ -190,14 +190,17 @@ def fetch_new_hashes(urls, cache):
     return failed, limited.is_set()
 
 
-def refresh(directory, image_budget, *, backfill_all=False):
+def refresh(directory, image_budget, *, backfill_all=False, cached_source=False):
     inputs = directory / 'mtg-sources'
     inputs.mkdir(exist_ok=True)
     seed_path = inputs / 'phash_cards_1.db'
     download_seed(seed_path)
     seeded = seed_hashes(seed_path)
     print(f'MOSS fingerprint seed: {len(seeded):,} valid product IDs', flush=True)
-    metadata = catalog_metadata(inputs / 'scryfall-paper.json')
+    metadata_path = inputs / 'scryfall-paper.json'
+    metadata = json_read(metadata_path, {}) if cached_source else catalog_metadata(metadata_path)
+    if len(metadata.get('cards', [])) < MIN_PAPER_PRINTINGS or not metadata.get('version'):
+        raise ValueError('No validated paper catalog source is available')
     index_path = directory / 'catalog-index.json'
     previous = json_read(index_path, {})
     prior_cards = previous.get('cards', []) if previous.get('algorithm') == ALGORITHM else []
@@ -205,7 +208,8 @@ def refresh(directory, image_budget, *, backfill_all=False):
     local_metadata = metadata_rows(inputs / 'moss-mtg-metadata.db')
     cross_checks = sum(row['product_id'] in local_metadata for row in metadata['cards'])
     print(f'MOSS metadata rows: {len(local_metadata):,} ({cross_checks:,} Scryfall ID joins)', flush=True)
-    tracking = tracking_foundations(inputs / 'tcgtracking-foundations.json')
+    tracking_path = inputs / 'tcgtracking-foundations.json'
+    tracking = json_read(tracking_path, {}) if cached_source else tracking_foundations(tracking_path)
     tracking_rows = {int(key): row for key, row in tracking.items()}
     print(f'TCGTracking Foundations metadata: {len(tracking):,} product IDs', flush=True)
     cards = {**local_metadata, **tracking_rows,
@@ -293,6 +297,8 @@ def main():
     parser.add_argument('--image-budget', type=int, default=500)
     parser.add_argument('--backfill-all', action='store_true',
                         help='Process every outstanding image in batches of --image-budget')
+    parser.add_argument('--cached-source', action='store_true',
+                        help='Backfill using the existing validated bulk metadata without refreshing it')
     options = parser.parse_args()
     directory = options.data_dir.resolve()
     if not directory.is_dir() or 'public_html' in directory.parts:
@@ -309,7 +315,8 @@ def main():
         except BlockingIOError:
             print('Refresh already in progress', flush=True)
             return
-        refresh(directory, options.image_budget, backfill_all=options.backfill_all)
+        refresh(directory, options.image_budget, backfill_all=options.backfill_all,
+                cached_source=options.cached_source)
 
 
 if __name__ == '__main__':
