@@ -8,7 +8,6 @@ import gzip
 import json
 import os
 from pathlib import Path
-import re
 import sqlite3
 from threading import Event
 from urllib.error import HTTPError
@@ -16,7 +15,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from catalog_match import ALGORITHM, parse_hashes
-from refresh_catalog import USER_AGENT, get_json, image_hashes
+from refresh_catalog import TRACKING, USER_AGENT, get_json, image_hashes
 
 SEED_URL = 'https://www.tcgtraders.app/recognition_data/phash_cards_1.db'
 MANIFEST_URL = 'https://api.scryfall.com/bulk-data'
@@ -142,6 +141,27 @@ def catalog_metadata(cache):
     return result
 
 
+def tracking_foundations(cache):
+    """Keep the existing TCGTracking supplement keyed by stable product IDs."""
+    try:
+        feed = get_json(f'{TRACKING}/23556/cards')
+        products = feed['products']
+        if (feed['set_id'] != 23556 or feed['set_abbr'].lower() != 'fdn'
+                or len(products) != feed['product_count'] or len(products) < 100):
+            raise ValueError('Unexpected Foundations supplement')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f'TCGTracking supplement unavailable ({type(exc).__name__}), using last copy', flush=True)
+        return json_read(cache, {})
+    prior = json_read(cache, {})
+    current = {str(p['id']): {'product_id': p['id'], 'scryfall_id': p.get('scryfall_id'),
+                             'name': p['name'], 'set': 'fdn', 'collector_number': p.get('number'),
+                             'images': [p['image_url']] if p.get('image_url') else [],
+                             'finishes': [], 'source': 'tcgtracking'} for p in products}
+    if current != prior:
+        atomic_json(cache, current)
+    return current
+
+
 def fetch_new_hashes(urls, cache):
     limited = Event()
 
@@ -180,7 +200,11 @@ def refresh(directory, image_budget):
     local_metadata = metadata_rows(inputs / 'moss-mtg-metadata.db')
     cross_checks = sum(row['product_id'] in local_metadata for row in metadata['cards'])
     print(f'MOSS metadata rows: {len(local_metadata):,} ({cross_checks:,} Scryfall ID joins)', flush=True)
-    cards = {**local_metadata, **{row['product_id'] or row['scryfall_id']: row for row in metadata['cards']}}
+    tracking = tracking_foundations(inputs / 'tcgtracking-foundations.json')
+    tracking_rows = {int(key): row for key, row in tracking.items()}
+    print(f'TCGTracking Foundations metadata: {len(tracking):,} product IDs', flush=True)
+    cards = {**local_metadata, **tracking_rows,
+             **{row['product_id'] or row['scryfall_id']: row for row in metadata['cards']}}
 
     refs = {url: h for row in prior_cards for url, h in zip(row['images'], row['hashes']) if url}
     seed_matches = sum(bool(row['product_id'] in seeded) for row in cards.values())
