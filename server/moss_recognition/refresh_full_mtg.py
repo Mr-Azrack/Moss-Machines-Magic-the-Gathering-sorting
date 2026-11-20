@@ -219,9 +219,10 @@ def refresh(directory, image_budget, *, backfill_all=False, cached_source=False)
     seed_matches = sum(bool(row['product_id'] in seeded) for row in cards.values())
     print(f'TCGplayer ID joins to fingerprint seed: {seed_matches:,}', flush=True)
     urls = {}
-    priorities = sorted(cards.values(), key=lambda row: (bool(row['product_id']),
-                        row.get('released_at', '')), reverse=True)
-    for row in priorities:
+    # Cover printings with no searchable face before filling supplemental faces.
+    priorities = sorted(cards.items(), key=lambda item: (item[0] not in prior,
+                        bool(item[1]['product_id']), item[1].get('released_at', '')), reverse=True)
+    for _, row in priorities:
         product_id = row['product_id']
         for i, url in enumerate(row['images']):
             if url in refs or (i == 0 and product_id in seeded):
