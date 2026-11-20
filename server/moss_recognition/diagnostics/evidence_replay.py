@@ -30,19 +30,29 @@ def footer_from_lines(lines):
         match = NUMBER.fullmatch(line)
         if match and not YEAR.fullmatch(match[1]):
             numbers[index] = match[1].lstrip('0').lower() or '0'
-    if len(set(numbers.values())) != 1:
-        return {}
-    evidence = {'collector_number': next(iter(numbers.values()))}
-    footer_rows = {index + direction for index in numbers for direction in (-1, 1)}
-    matches = [SET_LINE.match(line) for index, line in enumerate(normalized) if index in footer_rows]
-    pairs = [(match[1], MARKS.get(match[2])) for match in matches if match]
-    codes = {code for code, _ in pairs}
-    if len(codes) == 1:
-        evidence['set_abbreviation'] = codes.pop()
-        marks = {mark for _, mark in pairs if mark}
+
+    # The modern footer prints the collector number above the set and language.
+    # OCR can place part of the copyright year after that set row.
+    pairs = []
+    for index, line in enumerate(normalized):
+        match = SET_LINE.match(line)
+        if not match:
+            continue
+        number = numbers.get(index - 1) or numbers.get(index + 1)
+        if number is not None:
+            pairs.append((number, match[1], MARKS.get(match[2])))
+
+    identities = {(number, code) for number, code, _ in pairs}
+    if len(identities) == 1:
+        number, code = identities.pop()
+        evidence = {'collector_number': number, 'set_abbreviation': code}
+        marks = {mark for _, _, mark in pairs if mark}
         if len(marks) == 1:
             evidence['foil_mark'] = marks.pop()
-    return evidence
+        return evidence
+    if not pairs and len(set(numbers.values())) == 1:
+        return {'collector_number': next(iter(numbers.values()))}
+    return {}
 
 
 def consensus(observations):
@@ -60,18 +70,30 @@ def footer_probes(image):
     if image.width > image.height:
         image = image.transpose(Image.Transpose.ROTATE_90)
     padded = image.size == (793, 1091)
-    # Keep the printed bottom edge and its guard margin on padded camera evidence.
+    # Keep the full printed footer height. Exclude copyright text to the right.
     if padded:
-        box = (12, 24 + round(1043 * .865), 24 + round(745 * .7), image.height - 7)
+        box = (12, 24 + round(1043 * .865), 24 + round(745 * .5), image.height - 7)
     else:
-        box = (0, round(image.height * .865), round(image.width * .7), image.height)
-    image = ImageOps.grayscale(image.crop(box))
-    enlarged = image.resize((1200, max(1, round(image.height * 1200 / image.width))),
+        box = (0, round(image.height * .865), round(image.width * .5), image.height)
+    image = ImageOps.grayscale(image)
+    footer = image.crop(box)
+    enlarged = footer.resize((800, max(1, round(footer.height * 800 / footer.width))),
                             Image.Resampling.LANCZOS)
     grayscale = ImageOps.autocontrast(enlarged, cutoff=1)
     yield 'gray', ImageOps.expand(grayscale, border=12, fill=0)
     yield 'inverse', ImageOps.expand(ImageOps.invert(grayscale), border=12, fill=255)
     yield 'binary', ImageOps.expand(grayscale.point(lambda x: 255 if x >= 140 else 0), border=12, fill=0)
+    if padded:
+        # Restrict these probes to the two printed lines in a padded camera capture.
+        for variant, right, top in (('tight_gray', .23, .915), ('tight_binary', .25, .92)):
+            footer = image.crop((36, round(image.height * top), round(image.width * right),
+                                 round(image.height * .978)))
+            height = max(1, round(footer.height * 680 / footer.width))
+            probe = ImageOps.autocontrast(footer.resize((680, height), Image.Resampling.LANCZOS),
+                                          cutoff=1)
+            if variant == 'tight_binary':
+                probe = probe.point(lambda value: 255 if value >= 135 else 0)
+            yield variant, ImageOps.expand(probe, border=16, fill=0)
 
 
 def read_windows(paths, manifest):
