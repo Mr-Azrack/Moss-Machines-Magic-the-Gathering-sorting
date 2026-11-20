@@ -107,6 +107,8 @@ class CatalogIndex:
                     identity = {key: card.get(key) for key in
                                 ('product_id', 'scryfall_id', 'name', 'set', 'collector_number')}
                     identity['finishes'] = card.get('finishes', [])
+                    if 'routing' in card:
+                        identity['routing'] = card['routing']
                     rows.append((identity, collector_key(identity['collector_number']),
                                  tuple(parse_hashes(h) for h in card['hashes'])))
                 self.snapshot = data['version'], tuple(data['sets']), rows, data.get('coverage')
