@@ -14,7 +14,11 @@ import cv2
 from PIL import Image
 
 from fixed_height_preview import Preview
-from hosted_live_lookup import HostedLookup, LookupUnavailable, proposed_bin
+import os
+if os.environ.get("MOSS_AI_SERVER_ENABLED") == "1":
+    from server_ai_lookup import HostedLookup, LookupUnavailable, proposed_bin
+else:
+    from hosted_live_lookup import HostedLookup, LookupUnavailable, proposed_bin
 
 HERE = Path(__file__).resolve().parent
 LOG = HERE / "hosted-camera-live.jsonl"

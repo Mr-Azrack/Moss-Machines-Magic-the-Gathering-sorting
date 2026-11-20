@@ -551,6 +551,15 @@ class RecognitionApp:
             if path == "/admin/login" and method in {"GET", "POST"}:
                 return self._login(environ, start_response)
             if path.startswith("/api/v1/"):
+                if path == "/api/v1/recognize-image" and method == "POST":
+                    if not (self._api_authorized(environ) or self._lookup_authorized(environ)):
+                        raise RequestError(401, "unauthorized", "valid MOSS lookup credential required")
+                    from ai_image_api import ImageRequestError, recognize_image
+                    try:
+                        outcome = recognize_image(self.catalog, self._json_body(environ))
+                    except ImageRequestError as exc:
+                        raise RequestError(exc.status, exc.code, exc.message) from exc
+                    return self._json(start_response, 200, outcome)
                 if path == "/api/v1/recognize" and method == "POST":
                     if not (self._api_authorized(environ) or self._lookup_authorized(environ)):
                         raise RequestError(401, "unauthorized", "valid MOSS lookup credential required")
