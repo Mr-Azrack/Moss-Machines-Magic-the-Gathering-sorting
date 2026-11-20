@@ -1,5 +1,6 @@
 """No hardware, server, or network required: exercise the real WSGI application."""
 import base64
+import hashlib
 import io
 import json
 import sys
@@ -19,7 +20,8 @@ class Client:
         self.app = app
         self.cookie = ""
 
-    def request(self, method, path, data=None, api_key=None, cookie=True, content_type=None, ip="127.0.0.1", csrf=None):
+    def request(self, method, path, data=None, api_key=None, cookie=True, content_type=None, ip="127.0.0.1", csrf=None,
+                lookup_key=None):
         if isinstance(data, dict) and content_type != "application/x-www-form-urlencoded":
             raw = json.dumps(data).encode()
             content_type = "application/json"
@@ -39,6 +41,8 @@ class Client:
                "wsgi.input": io.BytesIO(raw), "REMOTE_ADDR": ip, "wsgi.url_scheme": "https"}
         if api_key is not None:
             env["HTTP_X_MOSS_API_KEY"] = api_key
+        if lookup_key is not None:
+            env["HTTP_X_MOSS_LOOKUP_KEY"] = lookup_key
         if cookie and self.cookie:
             env["HTTP_COOKIE"] = "moss_admin=" + self.cookie
         output = b"".join(self.app(env, start_response))
@@ -97,6 +101,24 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(self.client.request("GET", "/api/v1/metrics")[0], 401)
         self.assertEqual(self.client.request("GET", "/api/v1/metrics", api_key="wrong")[0], 401)
         self.assertEqual(self.client.request("GET", "/api/v1/metrics", api_key="TEST_API_KEY_LONG_ENOUGH_123456")[0], 200)
+
+    def test_sorter_token_only_authorizes_catalog_lookup(self):
+        key = "a" * 64
+        data_dir = Path(self.tmp.name)
+        (data_dir / "lookup-token.sha256").write_text(hashlib.sha256(key.encode("ascii")).hexdigest())
+        routing = {"colors": ["U"], "type_line": "Instant", "mana_value": 2, "rarity": "common"}
+        hashes = ["a" * 64] * 3
+        payload = {"game": "magic", "algorithm": "moss-rgb-phash-256", "rgb_phash": hashes}
+        (data_dir / "catalog-index.json").write_text(json.dumps({
+            "algorithm": payload["algorithm"], "sets": ["dft"], "version": "unit-test",
+            "cards": [{"product_id": 123, "set": "dft", "collector_number": "63", "name": "Test",
+                       "hashes": [hashes], "routing": routing}]}))
+        status, _, result = self.client.request("POST", "/api/v1/recognize", data=payload, lookup_key=key)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["candidate"]["routing"], routing)
+        self.assertEqual(self.client.request("POST", "/api/v1/recognize", data=payload, lookup_key="b" * 64)[0], 401)
+        self.assertEqual(self.client.request("POST", "/api/v1/scans", data=self.payload, lookup_key=key)[0], 401)
+        self.assertEqual(self.client.request("GET", "/api/v1/metrics", lookup_key=key)[0], 401)
 
     def test_upload_is_pending_not_trusted_and_cannot_read_image_without_admin(self):
         code, hdr, data = self.scan()
