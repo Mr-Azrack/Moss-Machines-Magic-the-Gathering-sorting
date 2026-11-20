@@ -21,6 +21,7 @@ SEED_URL = 'https://www.tcgtraders.app/recognition_data/phash_cards_1.db'
 MANIFEST_URL = 'https://api.scryfall.com/bulk-data'
 MIN_PAPER_PRINTINGS = 50_000
 MIN_RECOGNIZABLE_PRINTINGS = 50_000
+METADATA_SCHEMA_VERSION = 2
 
 
 def json_read(path, fallback):
@@ -107,6 +108,10 @@ def paper_rows(stream):
             images = []
         regular = card.get('tcgplayer_id')
         etched = card.get('tcgplayer_etched_id')
+        face = (card.get('card_faces') or [card])[0]
+        routing = {'colors': face.get('colors', card.get('colors')),
+                   'type_line': face.get('type_line', card.get('type_line')),
+                   'mana_value': card.get('cmc'), 'rarity': card.get('rarity')}
         for product_id in dict.fromkeys([p for p in (regular, etched) if p] or [None]):
             finishes = card.get('finishes', [])
             if etched and regular != etched:
@@ -114,7 +119,7 @@ def paper_rows(stream):
             item = {'product_id': product_id, 'scryfall_id': card['id'], 'name': card['name'],
                     'set': card['set'], 'collector_number': card['collector_number'],
                     'images': images, 'finishes': finishes, 'released_at': card.get('released_at', ''),
-                    'source': 'scryfall'}
+                    'source': 'scryfall', 'routing': routing}
             cards.setdefault(product_id or card['id'], item)
     return list(cards.values())
 
@@ -124,7 +129,8 @@ def catalog_metadata(cache):
     entry = next(row for row in manifest['data'] if row['type'] == 'default_cards')
     version = entry['updated_at']
     stored = json_read(cache, {})
-    if stored.get('version') == version and len(stored.get('cards', [])) >= MIN_PAPER_PRINTINGS:
+    if (stored.get('version') == version and stored.get('schema') == METADATA_SCHEMA_VERSION
+            and len(stored.get('cards', [])) >= MIN_PAPER_PRINTINGS):
         return stored
     url = entry.get('jsonl_download_uri')
     parts = urlsplit(url or '')
@@ -135,7 +141,7 @@ def catalog_metadata(cache):
         cards = paper_rows(stream)
     if len(cards) < max(MIN_PAPER_PRINTINGS, len(stored.get('cards', [])) * 0.95):
         raise ValueError('Scryfall bulk result is unexpectedly small')
-    result = {'version': version, 'cards': cards}
+    result = {'version': version, 'schema': METADATA_SCHEMA_VERSION, 'cards': cards}
     atomic_json(cache, result)
     print(f'Scryfall paper catalog: {len(cards):,} records ({version})', flush=True)
     return result
