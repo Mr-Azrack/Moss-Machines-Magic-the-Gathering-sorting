@@ -26,9 +26,9 @@ from urllib.parse import parse_qs, quote
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from catalog_match import ALGORITHM, CatalogIndex, parse_hashes
+from catalog_match import ALGORITHM, CatalogIndex, parse_evidence, parse_hashes
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_BYTES = 3 * 1024 * 1024
 MAX_PIXELS = 9_000_000
@@ -371,7 +371,11 @@ class RecognitionApp:
         except ValueError as exc:
             raise RequestError(400, "invalid_fingerprint", str(exc)) from exc
         try:
-            result = self.catalog.match(hashes, set_code)
+            evidence = parse_evidence(body.get("evidence", {}))
+        except ValueError as exc:
+            raise RequestError(400, "invalid_evidence", str(exc)) from exc
+        try:
+            result = self.catalog.match(hashes, set_code, evidence)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise RequestError(503, "catalog_unavailable", "recognition catalog is unavailable") from exc
         return self._json(start_response, 200, result)

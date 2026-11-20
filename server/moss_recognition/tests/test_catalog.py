@@ -55,3 +55,18 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(self.request(set='../../../')[0], 400)
         self.publish('1', 'f')
         self.assertEqual(self.request(set='dft')[2]['status'], 'unsupported_scope')
+
+    def test_printed_evidence_can_disambiguate_but_must_agree(self):
+        self.publish('evidence', '0')
+        raw = json.loads(self.path.read_bytes())
+        raw['cards'][0]['finishes'] = ['foil', 'nonfoil']
+        raw['cards'][1]['collector_number'] = '29a'
+        self.path.write_text(json.dumps(raw))
+        code, _, result = self.request(evidence={'set_abbreviation': 'FDN', 'symbol_set': 'fdn',
+                                                'collector_number': '0029/271', 'foil_mark': 'star'})
+        self.assertEqual(code, 200)
+        self.assertEqual(result['candidate']['product_id'], 1)
+        self.assertEqual(result['candidate']['finish'], 'foil')
+        result = self.request(evidence={'set_abbreviation': 'fdn', 'symbol_set': 'dft'})[2]
+        self.assertEqual(result['status'], 'set_evidence_conflict')
+        self.assertEqual(self.request(evidence={'foil_mark': True})[0], 400)

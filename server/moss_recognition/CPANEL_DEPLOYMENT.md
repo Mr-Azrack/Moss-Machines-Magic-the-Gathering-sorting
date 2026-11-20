@@ -55,3 +55,28 @@ via atomic replacement. A failed refresh leaves the last usable index available.
 Use Scryfall's compressed Default Cards bulk manifest for a future full-game
 rollout. The pilot is advisory because a missing out-of-set reprint can change
 the match decision.
+
+## Full paper Magic index
+
+Use `refresh_full_mtg.py --data-dir /home/thegamestationlw/moss_private_data
+--image-budget 1500` in the existing daily cron. It reads Scryfall's Default Cards
+bulk manifest, keeps paper records, and joins the Magic MOSS reference hashes by
+TCGplayer product ID. References and catalog snapshots live only in the private
+data directory. A repeat run saves an unchanged snapshot and uses available
+fingerprints before fetching missing images. Coverage reports how many catalog
+records still need a reference. The source uses Scryfall's default language
+selection. Its separate All Cards multilingual export is outside this job.
+
+`POST /api/v1/recognize` accepts an optional `evidence` object with
+`set_abbreviation`, `symbol_set`, `collector_number`, and `foil_mark`
+(`star`, `dot`, or `unknown`). Supply only confident visual observations.
+A symbol/set disagreement returns an explicit conflict. A star selects a
+premium finish only when the indexed printing has exactly one premium finish.
+Results remain advisory. The endpoint verifies text and marks that the vision
+client sends. It does not extract them from RGB fingerprints.
+
+For the camera's evidence image, `camera_evidence.evidence_crop` accepts
+the original frame and detected corners in TL, TR, BR, BL order. It leaves
+2 mm of real image outside each card edge and rejects clipped frames. Use the
+current tight crop for fingerprint generation. No live capture pathway imports
+this helper yet.

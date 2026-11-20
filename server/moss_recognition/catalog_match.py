@@ -45,6 +45,47 @@ def parse_hashes(hashes):
     return tuple(int(part, 16) for part in hashes)
 
 
+SET_CODE = re.compile(r'[a-z0-9]{2,8}', re.I)
+COLLECTOR = re.compile(r'([a-z]{0,3})([0-9]{1,6})([a-z★†]{0,3})(?:/[0-9]{1,6})?', re.I)
+
+
+def collector_key(value):
+    match = COLLECTOR.fullmatch(value.strip()) if isinstance(value, str) else None
+    return f'{match[1].lower()}{int(match[2])}{match[3].lower()}' if match else None
+
+
+def parse_evidence(value):
+    if not isinstance(value, dict) or set(value) - {'set_abbreviation', 'symbol_set', 'collector_number', 'foil_mark'}:
+        raise ValueError('Invalid card evidence fields')
+    clean = {}
+    for field in ('set_abbreviation', 'symbol_set'):
+        code = value.get(field)
+        if code is not None:
+            if not isinstance(code, str) or not SET_CODE.fullmatch(code):
+                raise ValueError('Expected an MTG set code')
+            clean[field] = code.lower()
+    if value.get('collector_number') is not None:
+        normalized = collector_key(value['collector_number'])
+        if normalized is None:
+            raise ValueError('Expected a collector number')
+        clean['collector_number'] = normalized
+    mark = value.get('foil_mark', 'unknown')
+    if mark not in ('unknown', 'star', 'dot'):
+        raise ValueError('Expected unknown, star, or dot as the foil mark')
+    if mark != 'unknown':
+        clean['foil_mark'] = mark
+    return clean
+
+
+def finish_from_mark(allowed, mark):
+    if mark == 'dot':
+        return 'nonfoil' if 'nonfoil' in allowed else None
+    if mark == 'star':
+        options = [finish for finish in allowed if finish in ('foil', 'etched')]
+        return options[0] if len(options) == 1 else None
+    return None
+
+
 class CatalogIndex:
     def __init__(self, path):
         self.path = path
@@ -57,42 +98,66 @@ class CatalogIndex:
             info = self.path.stat()
             stamp = (info.st_ino, info.st_mtime_ns, info.st_size)
             if stamp != self.stamp:
-                data = json.loads(self.path.read_bytes())
+                with self.path.open(encoding='utf-8') as file:
+                    data = json.load(file)
                 if data['algorithm'] != ALGORITHM or not data['cards']:
                     raise ValueError('Invalid recognition snapshot')
                 rows = []
                 for card in data['cards']:
                     identity = {key: card.get(key) for key in
                                 ('product_id', 'scryfall_id', 'name', 'set', 'collector_number')}
-                    for hashes in card['hashes']:
-                        rows.append((identity, parse_hashes(hashes)))
-                self.snapshot = data['version'], tuple(data['sets']), rows
+                    identity['finishes'] = card.get('finishes', [])
+                    rows.append((identity, collector_key(identity['collector_number']),
+                                 tuple(parse_hashes(h) for h in card['hashes'])))
+                self.snapshot = data['version'], tuple(data['sets']), rows, data.get('coverage')
                 self.stamp = stamp
             return self.snapshot
 
-    def match(self, hashes, set_code=None):
-        version, sets, rows = self.load()
-        best = {}
-        for card, reference in rows:
-            if set_code and card['set'] != set_code:
+    def match(self, hashes, set_code=None, evidence=None):
+        version, sets, rows, coverage = self.load()
+        evidence = evidence or {}
+        stated_sets = {value for value in
+                       (set_code, evidence.get('set_abbreviation'), evidence.get('symbol_set')) if value}
+        collector = evidence.get('collector_number')
+        mark = evidence.get('foil_mark')
+        stated_set = next(iter(stated_sets)) if len(stated_sets) == 1 else None
+        result = {'status': 'no_match', 'candidate': None, 'suggestions': [],
+                  'catalog_version': version, 'catalog_set_count': len(sets), 'advisory_only': True,
+                  'evidence': evidence}
+        if len(sets) <= 32:
+            result['catalog_sets'] = list(sets)
+        if coverage is not None:
+            result['catalog_coverage'] = coverage
+        if len(stated_sets) > 1:
+            return {**result, 'status': 'set_evidence_conflict'}
+        if stated_set and stated_set not in sets:
+            return {**result, 'status': 'unsupported_scope'}
+        both_footer_fields = bool(evidence.get('set_abbreviation') and collector)
+
+        eligible = []
+        for card, number, references in rows:
+            if (stated_set and card['set'] != stated_set) or (collector and number != collector):
                 continue
-            identity = card['product_id'] or card['scryfall_id']
-            distance = sum((a ^ b).bit_count() for a, b in zip(hashes, reference))
-            if identity not in best or distance < best[identity][0]:
-                best[identity] = (distance, card)
-        top = heapq.nsmallest(3, best.values(), key=lambda entry: entry[0])
-        suggestions = [{**card, 'distance': round(distance / 3, 2)} for distance, card in top]
-        candidate = None
-        status = 'no_match'
-        if set_code and set_code not in sets:
-            status = 'unsupported_scope'
-        elif top and top[0][0] <= 96:
-            if len(top) > 1 and top[1][0] - top[0][0] < 15:
-                status = 'ambiguous'
-            elif top[0][1]['product_id'] is None:
-                status = 'unmapped_printing'
-            else:
-                status = 'candidate'
-                candidate = suggestions[0]
-        return {'status': status, 'candidate': candidate, 'suggestions': suggestions,
-                'catalog_version': version, 'catalog_sets': list(sets), 'advisory_only': True}
+            # Some imported IDs have no declared finishes; do not rule them out.
+            if mark and card['finishes'] and mark == 'dot' and 'nonfoil' not in card['finishes']:
+                continue
+            if mark == 'star' and card['finishes'] and not ({'foil', 'etched'} & set(card['finishes'])):
+                continue
+            eligible.append((card, references))
+
+        ranked = ((min(sum((a ^ b).bit_count() for a, b in zip(hashes, ref)) for ref in refs), card)
+                  for card, refs in eligible if refs)
+        top = heapq.nsmallest(3, ranked, key=lambda entry: entry[0])
+        suggestions = [{**card, 'distance': round(distance / 3, 2),
+                        'finish': finish_from_mark(card['finishes'], mark)}
+                       for distance, card in top]
+        result['suggestions'] = suggestions
+        if not top or top[0][0] > (132 if both_footer_fields else 96):
+            return result
+        if len(top) > 1 and top[1][0] - top[0][0] < 15:
+            result['status'] = 'ambiguous'
+        elif top[0][1]['product_id'] is None:
+            result['status'] = 'unmapped_printing'
+        else:
+            result.update(status='candidate', candidate=suggestions[0])
+        return result
