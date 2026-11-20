@@ -1,4 +1,4 @@
-"""Camera-only preview for a quarter-turned MOSS camera at its current height."""
+"""Camera-only preview for the MOSS camera at its current height."""
 
 from datetime import datetime
 import tkinter as tk
@@ -8,7 +8,7 @@ import time
 import cv2
 from PIL import Image, ImageTk
 
-from capture_evidence import FOUNDATIONS, outer_border_crop, padded_card, save_image
+from capture_evidence import FOUNDATIONS, available_card_evidence, outer_border_crop, save_card_evidence, save_image
 
 ROTATIONS = {
     '90° clockwise': cv2.ROTATE_90_CLOCKWISE,
@@ -30,7 +30,7 @@ def crop_upright(frame, contour):
     _, _, width, height = cv2.boundingRect(contour)
     if width >= height:
         raise SidewaysCard
-    return padded_card(frame, contour)
+    return available_card_evidence(frame, contour)
 
 
 class Preview:
@@ -41,7 +41,7 @@ class Preview:
         self.evidence = None
         self.last_orientation = None
         self.directory = FOUNDATIONS / 'captures' / f'fixed-height_{datetime.now():%Y%m%d_%H%M%S}'
-        self.orientation = tk.StringVar(value='90° clockwise')
+        self.orientation = tk.StringVar(value='None')
 
         root.title('MOSS Fixed-Height Camera Preview')
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -83,9 +83,13 @@ class Preview:
         except SidewaysCard:
             return None, 'Choose a rotation that makes the card upright.'
         except ValueError:
-            return None, 'The card is too close to the edge for a full 2 mm margin'
+            return None, 'Could not align this card crop. Try another position in the frame.'
         if evidence is None:
             return None, 'The full outer edge is unclear. Center the card and check that it is upright.'
+        if evidence.footer_at_frame_edge:
+            return evidence, 'Tight crop available. The footer may be clipped, so check it before relying on OCR.'
+        if evidence.outside_margin_mm == 0:
+            return evidence, 'Tight crop available. Check the footer, then save.'
         return evidence, 'Full 2 mm margin detected. Check the card text is upright, then save.'
 
     def save(self):
@@ -96,7 +100,7 @@ class Preview:
             key = time.time_ns()
             save_image(self.directory / f'{key}_raw.png', self.frame)
             path = self.directory / f'{key}_evidence.png'
-            save_image(path, self.evidence)
+            save_card_evidence(path, self.evidence)
         except OSError as exc:
             self.result.configure(text=f'Unable to save evidence. {exc}')
             return

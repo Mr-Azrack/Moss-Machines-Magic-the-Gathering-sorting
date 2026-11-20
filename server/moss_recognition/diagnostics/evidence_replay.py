@@ -85,6 +85,7 @@ def read_windows(paths, manifest):
 
 def replay(samples, directory):
     groups = defaultdict(list)
+    capture_details = {}
     with tempfile.TemporaryDirectory(prefix='moss-footer-') as temp:
         scratch = Path(temp)
         paths = {}
@@ -92,6 +93,12 @@ def replay(samples, directory):
             image_path = Path(sample['image'])
             if not image_path.is_absolute():
                 image_path = directory / image_path
+            sidecar = image_path.with_suffix('.json')
+            if sidecar.is_file():
+                try:
+                    capture_details[index] = json.loads(sidecar.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    capture_details[index] = {}
             with Image.open(image_path) as image:
                 for variant, probe in footer_probes(image):
                     path = scratch / f'{index:03d}-{variant}.png'
@@ -105,13 +112,20 @@ def replay(samples, directory):
     for index, sample in enumerate(samples):
         readings = groups[index]
         evidence = consensus([row['fields'] for row in readings])
+        capture = capture_details.get(index, {})
+        review = []
+        if capture.get('footer_at_frame_edge'):
+            review.append('footer_may_be_clipped')
+        if 'set_abbreviation' not in evidence or 'collector_number' not in evidence:
+            review.append('printing_footer_incomplete')
         record = {'label': sample['label'], 'image': sample['image'],
                   'reference_set': sample.get('reference_set'),
                   'reference_number': sample.get('reference_number'),
                   'reference_source': sample.get('reference_source'),
-                  'evidence': evidence, 'ocr': readings}
+                  'evidence': evidence, 'capture': capture, 'review': review, 'ocr': readings}
         report.append(record)
-        print(f"{sample['label']}: {evidence or 'unreadable'}", flush=True)
+        notes = f" (review: {', '.join(review)})" if review else ''
+        print(f"{sample['label']}: {evidence or 'unreadable'}{notes}", flush=True)
     return report
 
 
@@ -120,7 +134,7 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--samples', type=Path)
     source.add_argument('--image', type=Path)
-    source.add_argument('--captures', type=Path, help='Directory of padded camera evidence images')
+    source.add_argument('--captures', type=Path, help='Directory of saved camera evidence images')
     args = parser.parse_args()
     if args.samples:
         with args.samples.open(encoding='utf-8-sig', newline='') as manifest:
