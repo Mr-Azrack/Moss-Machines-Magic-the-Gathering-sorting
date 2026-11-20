@@ -1,6 +1,8 @@
-# MOSS AI image-only camera test. No movement or motor commands.
 $ErrorActionPreference = 'Stop'
 $env:MOSS_AI_SERVER_ENABLED = '1'
+$diagRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$pilotPath = Join-Path $diagRoot 'Foundations_Pilot'
+$env:PYTHONPATH = if ($env:PYTHONPATH) { $pilotPath + [IO.Path]::PathSeparator + $env:PYTHONPATH } else { $pilotPath }
 $secretFile = Join-Path $env:LOCALAPPDATA 'MOSS\Hosted\lookup.dpapi'
 if (-not (Test-Path -LiteralPath $secretFile)) { throw 'MOSS lookup credential not configured on this PC.' }
 $secret = Get-Content -LiteralPath $secretFile | ConvertTo-SecureString
