@@ -1,6 +1,10 @@
 # MOSS Recognition Center — v0.1
 
-Independent, low-resource **card-recognition review and verified-example service** for MOSS. Designed for a separate cPanel Python application and SQLite storage. This is a real, working first stage of the central recognition system, **not** yet a trained neural-network AI model.
+Independent, low-resource **card-recognition review and verified-example service** for MOSS.
+
+**New server-side AI implementation (feature branch, not yet deployed):** See [AI_DEPLOYMENT.md](AI_DEPLOYMENT.md) for the opt-in `/api/v1/recognize-image` endpoint, private PaddleOCR worker, camera-only integration, safety tests, and infrastructure requirements. The live production site still needs the worker installed and benchmarked; the current fingerprint matching service remains unchanged.
+
+Designed for a separate cPanel Python application and SQLite storage. This is a real, working first stage of the central recognition system, **not** yet a trained neural-network AI model.
 
 **Do not replace the existing MOSS sorter recognition engine or install this on the sorter PC yet.** The Arduino and sorter Python files are unchanged. Every response is `advisory_only: true`; a remote match must never bypass the sorter's own identification safety checks or command the Arduino.
 
@@ -16,11 +20,11 @@ Independent, low-resource **card-recognition review and verified-example service
 
 ### Limitations by design
 
-- The server does **not** know the entire card catalog yet. Candidate IDs/metadata originate with the sorter, and an operator must check them. Manual corrections require product ID, card name, set, and collector number. We will add authoritative catalog checks before allowing a server decision to participate in sorting.
+- The server now indexes a broad Scryfall paper Magic catalog with fingerprints, but catalog coverage is **not complete**. Some printings still lack reference images or mapping IDs. The current server result remains advisory and the operator must check exact printing, set, number, and finish.
 - dHash is deliberately lightweight and can mistake same-art printings for one another. The returned `dhash_distance` is **not** a calibrated confidence probability. Never auto-sort based on the remote suggestion alone.
 - `MAX_EXAMPLES_SEARCHED=20000` bounds full-gallery comparisons on shared hosting; once the gallery grows beyond it, lookup explicitly reports `gallery_limit_exceeded` instead of silently returning incomplete matches. Future revisions will add an indexed search.
 - Host limits for background workers, model weights, CPU, memory, and automated inference have **not** been verified. A larger AI model should be hosted elsewhere if cPanel limits prevent it.
-- No full device synchronization, automated installer, internet fallback, account-specific roles, model training, purge/retention scheduler, or sorter-side adapter has been deployed. These remain tracked in `ROADMAP.md`.
+- No full device synchronization, automated installer, internet fallback, account-specific roles, production ML model deployment, purge/retention scheduler, or live-sorter AI activation has been verified. An opt-in camera-only adapter is staged in this feature branch.
 
 ## Server deployment on cPanel
 
