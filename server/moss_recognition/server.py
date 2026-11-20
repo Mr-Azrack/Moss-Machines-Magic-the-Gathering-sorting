@@ -28,7 +28,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from catalog_match import ALGORITHM, CatalogIndex, parse_evidence, parse_hashes
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_BYTES = 3 * 1024 * 1024
 MAX_PIXELS = 9_000_000
@@ -248,6 +248,16 @@ class RecognitionApp:
     def _api_authorized(self, environ):
         supplied = environ.get("HTTP_X_MOSS_API_KEY", "")
         return bool(supplied) and hmac.compare_digest(supplied, self.api_key)
+
+    def _lookup_authorized(self, environ):
+        supplied = environ.get("HTTP_X_MOSS_LOOKUP_KEY", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", supplied):
+            return False
+        try:
+            expected = (self.data_dir / "lookup-token.sha256").read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            return False
+        return hmac.compare_digest(hashlib.sha256(supplied.encode("ascii")).hexdigest(), expected)
 
     def _session_cookie(self, environ):
         cookies = environ.get("HTTP_COOKIE", "")
@@ -541,12 +551,14 @@ class RecognitionApp:
             if path == "/admin/login" and method in {"GET", "POST"}:
                 return self._login(environ, start_response)
             if path.startswith("/api/v1/"):
+                if path == "/api/v1/recognize" and method == "POST":
+                    if not (self._api_authorized(environ) or self._lookup_authorized(environ)):
+                        raise RequestError(401, "unauthorized", "valid MOSS lookup credential required")
+                    return self._recognize_catalog(environ, start_response)
                 if not self._api_authorized(environ):
                     raise RequestError(401, "unauthorized", "valid X-MOSS-API-Key required")
                 if path == "/api/v1/scans" and method == "POST":
                     return self._ingest(environ, start_response, True)
-                if path == "/api/v1/recognize" and method == "POST":
-                    return self._recognize_catalog(environ, start_response)
                 if path == "/api/v1/match" and method == "POST":
                     return self._ingest(environ, start_response, False)
                 if path == "/api/v1/metrics" and method == "GET":
