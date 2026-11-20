@@ -25,3 +25,20 @@ jobs:
         run: python -m pip install -r server/moss_recognition/requirements.txt
       - name: Test recognition review and API safety
         run: python -Werror -m unittest discover -s server/moss_recognition/tests -v
+
+  staging-source-bundle:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build source-only AI staging bundle
+        run: python server/moss_recognition/build_ai_bundle.py --output moss-ai-staging.zip
+      - name: Upload verified staging archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-ai-staging-source
+          path: moss-ai-staging.zip
+          retention-days: 14

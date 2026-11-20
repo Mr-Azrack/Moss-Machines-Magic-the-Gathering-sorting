@@ -92,16 +92,25 @@ def recognize_image(catalog, payload, *, worker=query_worker):
                 "advisory_only": True, "reason": "Printed footer may be outside camera view"}
     image = load_image(payload.get("image_base64"))
     worker_result = worker(image)
+    if not isinstance(worker_result, dict):
+        raise ImageRequestError(503, "ai_unavailable", "Invalid OCR worker response")
     try:
         evidence = parse_evidence(worker_result.get("evidence", {}))
     except (TypeError, ValueError):
         raise ImageRequestError(503, "ai_unavailable", "Invalid OCR worker evidence")
+    if worker_result.get("engine") != "paddleocr":
+        raise ImageRequestError(503, "ai_unavailable", "Unexpected OCR worker response")
     evidence_meta = {"engine": "paddleocr", "evidence": evidence,
                      "review_reason": worker_result.get("review_reason")}
+    image_hashes = tuple(int(part, 16) for part in fingerprint(image))
     if not evidence.get("set_abbreviation") or not evidence.get("collector_number"):
-        return {"status": "needs_review", "candidate": None, "suggestions": [],
+        # For old cards without modern footer codes, give the operator image
+        # suggestions but NEVER return a machine-acceptable candidate.
+        preliminary = catalog.match(image_hashes, evidence=evidence)
+        return {"status": "needs_review", "candidate": None,
+                "suggestions": preliminary.get("suggestions", [])[:3],
                 "advisory_only": True, "ai": evidence_meta}
-    result = catalog.match(tuple(int(part, 16) for part in fingerprint(image)), evidence=evidence)
+    result = catalog.match(image_hashes, evidence=evidence)
     result["ai"] = evidence_meta
     # The server is an advisor; only a separate verified physical sorter gate can move a card.
     result["advisory_only"] = True

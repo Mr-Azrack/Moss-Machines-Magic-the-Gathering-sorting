@@ -41,3 +41,36 @@ Close every other app using the UC60 camera. Run `START_AI_CAMERA_TEST.cmd`, the
 `python export_verified_training.py --data-dir /private/moss_private_data --output-dir /private/moss_private_data/training`
 
 It exports approved-image paths and exact printing labels, split by product ID. This is a dataset manifest only: to train OCR detection or recognition, crop and label specific text regions; to train an artwork model, add an embedding encoder and its training/evaluation job. Never auto-train on an unapproved match.
+
+
+## Prepared without the sorter (November 20, 2026)
+
+The feature branch now also provides:
+- `install_ai_worker.sh`: isolated Python 3.11/3.12 CPU-worker installer for a *dedicated Linux account/host*, with no public listener and no changes to the production cPanel WSGI app. Requires the official PaddlePaddle CPU package index.
+- `requirements-ai-worker.txt`: pinned initial PaddleOCR test environment. The production WSGI app still only needs `requirements.txt` (Pillow).
+- `ai_preflight.py`: read-only readiness inventory of Python, RAM availability, catalog, private storage, worker reachability, and whether credentials are configured. No secrets are printed.
+- `benchmark_ai_worker.py`: actual loopback worker latency measurement; real-card correctness must still be evaluated separately.
+- `build_ai_bundle.py`: reproducible allowlist-only source bundle that excludes credentials, catalog data, and camera images.
+- CI publishes the `moss-ai-staging-source` artifact *after passing the existing safety tests*. Download it from the completed MOSS Recognition Server GitHub Actions run.
+- The AI image endpoint returns up to three image-similarity suggestions for cards missing a reliable modern footer, **but never upgrades such suggestions to an auto-sortable candidate**.
+
+### Before starting a live AI worker
+Verify host account resource limits with:
+```bash
+python ai_preflight.py --data-dir "$MOSS_DATA_DIR"
+```
+A worker cannot be marked ready until **all** of the catalog, credential, and OCR-worker checks succeed:
+```bash
+python ai_preflight.py --data-dir "$MOSS_DATA_DIR" --strict
+```
+For a dedicated Linux worker, first copy the staged bundle to the worker account and run `bash install_ai_worker.sh` as an **unprivileged** user, then supply `MOSS_AI_WORKER_TOKEN` through the private service environment, run `ai_worker.py` bound to loopback, and measure latency with `benchmark_ai_worker.py`. The worker must not share cPanel resources unless measured limits permit it.
+
+### Deployment blockers that do NOT involve the sorter
+- Hosting control-panel/terminal access is required to inspect the actual resource limits and install the worker. Browser tabs alone do not give an authorized shell connection.
+- The model must be initialized and benchmarked with real PaddleOCR weights on the target machine. **Mock-model HTTP tests do not satisfy that gate.**
+- The new WSGI route must be deployed independently, health-checked, and left advisory-only before enabling the sorter-side AI camera client.
+
+### What remains tied to the physical sorter
+- Fresh cards with reliable known labels from a range of sets/eras and finishes.
+- End-to-end recognition and camera-cycle latency, especially whether card-footers stay in the fixed-height frame.
+- A controlled dry run with no bin movement, then explicit physical motion validation.

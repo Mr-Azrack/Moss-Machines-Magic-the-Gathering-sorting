@@ -45,7 +45,7 @@ class AIImageTests(unittest.TestCase):
                                                      "review_reason": "no_pair"})
         self.assertEqual(result["status"], "needs_review")
         self.assertIsNone(result["candidate"])
-        self.assertFalse(catalog.calls)
+        self.assertEqual(len(catalog.calls), 1)
 
     def test_verified_footer_calls_catalog_once(self):
         catalog = Catalog()
@@ -63,6 +63,29 @@ class AIImageTests(unittest.TestCase):
         with self.assertRaises(ImageRequestError) as caught:
             recognize_image(Catalog(), sample(), worker=lambda img: {"evidence": {"foil_mark": "invented"}})
         self.assertEqual(caught.exception.status, 503)
+
+    def test_legacy_card_without_footer_offers_review_suggestions(self):
+        class GuessingCatalog(Catalog):
+            def match(self, hashes, evidence):
+                result = super().match(hashes, evidence)
+                result["suggestions"] = [{"name": "Sample", "set": "lea",
+                                          "collector_number": "5", "distance": 19.0}]
+                return result
+
+        catalog = GuessingCatalog()
+        result = recognize_image(catalog, sample(),
+                                 worker=lambda img: {"engine": "paddleocr", "evidence": {}})
+        self.assertEqual(result["status"], "needs_review")
+        self.assertIsNone(result["candidate"])
+        self.assertEqual(result["suggestions"][0]["set"], "lea")
+        self.assertEqual(len(catalog.calls), 1)
+
+    def test_malformed_ocr_reply_never_makes_a_match(self):
+        for reply in (None, [], {"engine": "wrong", "evidence": {}},
+                      {"engine": "paddleocr", "evidence": {"set_abbreviation": "no spaces"}}):
+            with self.subTest(reply=reply):
+                with self.assertRaises(ImageRequestError):
+                    recognize_image(Catalog(), sample(), worker=lambda img: reply)
 
     def test_worker_unavailable_is_fail_closed(self):
         with patch.dict("os.environ", {}, clear=True):
