@@ -167,25 +167,30 @@ def fetch_new_hashes(urls, cache):
 
     def process(url):
         if limited.is_set():
-            return None
+            return None, False
         try:
-            return image_hashes(url)
+            return image_hashes(url), True
         except HTTPError as exc:
             if exc.code == 429:
                 limited.set()
+                return None, False
         except (OSError, ValueError):
             pass
-        return None
+        return None, True
 
+    failed = []
     with ThreadPoolExecutor(max_workers=4) as workers:
-        for url, hashes in zip(urls, workers.map(process, urls)):
+        for url, (hashes, attempted) in zip(urls, workers.map(process, urls)):
             if hashes:
                 cache[url] = hashes
+            elif attempted:
+                failed.append(url)
     if limited.is_set():
         print('Image source rate limit reached. Remaining images will wait for the next run.', flush=True)
+    return failed, limited.is_set()
 
 
-def refresh(directory, image_budget):
+def refresh(directory, image_budget, *, backfill_all=False):
     inputs = directory / 'mtg-sources'
     inputs.mkdir(exist_ok=True)
     seed_path = inputs / 'phash_cards_1.db'
@@ -218,11 +223,35 @@ def refresh(directory, image_budget):
             if url in refs or (i == 0 and product_id in seeded):
                 continue
             urls[url] = None
-    batch = list(urls)[:image_budget]
-    if batch:
-        print(f'Fetching up to {len(batch):,} missing reference images of {len(urls):,} pending', flush=True)
-        fetch_new_hashes(batch, refs)
+    retry_path = inputs / 'image-retry-counts.json'
+    retries = {url: count for url, count in json_read(retry_path, {}).items() if url in urls}
+    # Process new URLs ahead of repeated failures so a bad image cannot block the catalog.
+    pending = sorted(urls, key=lambda url: retries.get(url, 0))
+    if not backfill_all:
+        pending = pending[:image_budget]
 
+    if not pending:
+        publish(index_path, previous, prior, cards, refs, seeded, metadata, local_metadata)
+    for start in range(0, len(pending), max(1, image_budget)):
+        batch = pending[start:start + image_budget]
+        print(f'Fetching {len(batch):,} reference images; {len(pending) - start:,} queued this run',
+              flush=True)
+        failed, rate_limited = fetch_new_hashes(batch, refs)
+        for url in failed:
+            retries[url] = retries.get(url, 0) + 1
+        for url in batch:
+            if url in refs:
+                retries.pop(url, None)
+        previous = publish(index_path, previous, prior, cards, refs, seeded, metadata, local_metadata)
+        atomic_json(retry_path, retries)
+        if rate_limited:
+            break
+
+    unresolved = sum(url not in refs for url in urls)
+    print(f'Remaining reference image URLs: {unresolved:,}', flush=True)
+
+
+def publish(index_path, previous, prior, cards, refs, seeded, metadata, local_metadata):
     result = dict(prior)
     seed_used = 0
     for key, row in cards.items():
@@ -238,41 +267,49 @@ def refresh(directory, image_budget):
         elif key in prior:
             result[key] = {**row, 'images': prior[key]['images'], 'hashes': prior[key]['hashes']}
     ordered = sorted(result.values(), key=lambda row: (row['set'], str(row['product_id'] or row['scryfall_id'])))
-    if len(ordered) < max(MIN_RECOGNIZABLE_PRINTINGS, len(prior_cards)):
+    previous_cards = previous.get('cards', [])
+    if len(ordered) < max(MIN_RECOGNIZABLE_PRINTINGS, len(previous_cards)):
         raise ValueError('Index coverage fell below the validated minimum')
     count = sum((row['product_id'] or row['scryfall_id']) in result for row in metadata['cards'])
     stats = {'paper_catalog_records': len(metadata['cards']), 'scryfall_searchable_records': count,
              'indexed_records': len(ordered), 'seeds_used': seed_used, 'moss_metadata_rows': len(local_metadata),
              'catalog_records_waiting_for_fingerprints': len(metadata['cards']) - count}
     sets = sorted({row['set'] for row in ordered})
-    if ordered != prior_cards or previous.get('coverage') != stats:
+    if ordered != previous_cards or previous.get('coverage') != stats:
         version = datetime.now(timezone.utc).isoformat(timespec='microseconds')
-        atomic_json(index_path, {'algorithm': ALGORITHM, 'sets': sets, 'version': version,
-                                 'coverage': stats, 'scryfall_version': metadata['version'], 'cards': ordered})
+        previous = {'algorithm': ALGORITHM, 'sets': sets, 'version': version,
+                    'coverage': stats, 'scryfall_version': metadata['version'], 'cards': ordered}
+        atomic_json(index_path, previous)
         print(f'Published {len(ordered):,} searchable printings across {len(sets):,} sets', flush=True)
     else:
         print('Index unchanged', flush=True)
     print(json.dumps(stats), flush=True)
+    return previous
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--image-budget', type=int, default=500)
+    parser.add_argument('--backfill-all', action='store_true',
+                        help='Process every outstanding image in batches of --image-budget')
     options = parser.parse_args()
     directory = options.data_dir.resolve()
     if not directory.is_dir() or 'public_html' in directory.parts:
         parser.error('Supply the private MOSS data directory')
     if not 0 <= options.image_budget <= 3000:
         parser.error('Image budget must be between zero and 3,000')
+    if options.backfill_all and not options.image_budget:
+        parser.error('--backfill-all requires a positive image budget')
     os.umask(0o077)
     with (directory / 'catalog-refresh.lock').open('a') as lock:
+        lock_mode = fcntl.LOCK_EX if options.backfill_all else fcntl.LOCK_EX | fcntl.LOCK_NB
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, lock_mode)
         except BlockingIOError:
             print('Refresh already in progress', flush=True)
             return
-        refresh(directory, options.image_budget)
+        refresh(directory, options.image_budget, backfill_all=options.backfill_all)
 
 
 if __name__ == '__main__':
