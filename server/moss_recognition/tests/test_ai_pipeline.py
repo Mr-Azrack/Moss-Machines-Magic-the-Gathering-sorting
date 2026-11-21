@@ -116,6 +116,12 @@ class FooterParserTests(unittest.TestCase):
         self.assertEqual(evidence["collector_number"], "63")
         self.assertEqual(evidence["foil_mark"], "dot")
 
+    def test_fused_set_language_and_rarity_prefixed_number(self):
+        evidence, reason = footer_evidence([("R 0194", 0.981),
+                                            ("SoSEnVincent Christiaens", 0.868)])
+        self.assertIsNone(reason)
+        self.assertEqual(evidence, {"set_abbreviation": "sos", "collector_number": "194"})
+
     def test_conflicting_and_low_confidence_ocr(self):
         self.assertEqual(footer_evidence([("63", 0.91), ("DFT EN", 0.96), ("64", 0.93),
                                            ("OTJ EN", 0.97)])[0], {})
