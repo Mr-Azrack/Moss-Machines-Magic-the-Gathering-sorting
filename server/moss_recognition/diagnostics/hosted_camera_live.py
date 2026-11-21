@@ -47,13 +47,18 @@ class HostedPreview(Preview):
         self.generation = 0
         self.submitted = False
         self.mode = tk.StringVar(value="color")
+        self.finish_confirmed = tk.BooleanVar(value=False)
+        self.manual_foil = tk.BooleanVar(value=False)
         strip = ttk.Frame(root, padding=8)
         strip.pack(fill="x")
         ttk.Label(strip, text="Tray rule").pack(side="left")
         ttk.Combobox(strip, textvariable=self.mode, values=("color", "finish", "set"),
                      state="readonly", width=12).pack(side="left", padx=8)
-        self.decision = ttk.Label(strip, text="Place one card in view", wraplength=660)
-        self.decision.pack(side="left", fill="x")
+        ttk.Label(strip, text="Manual finish").pack(side="left", padx=(12, 4))
+        ttk.Checkbutton(strip, text="Confirmed", variable=self.finish_confirmed).pack(side="left")
+        ttk.Checkbutton(strip, text="Foil", variable=self.manual_foil).pack(side="left")
+        self.decision = ttk.Label(root, text="Place one card in view", wraplength=660, padding=(8, 0, 8, 8))
+        self.decision.pack(fill="x")
         root.after(175, self.check_lookup)
 
     def check_lookup(self):
@@ -99,9 +104,18 @@ class HostedPreview(Preview):
             self.decision.configure(text="Card moved during lookup. Place it back to retry.")
             return
         mode = self.mode.get()
+        finish_source = None
         if card:
+            card = dict(card)
+            if self.finish_confirmed.get():
+                card["finish"] = "foil" if self.manual_foil.get() else "nonfoil"
+                finish_source = "operator"
+            else:
+                finish_source = "footer" if card.get("finish") in {"nonfoil", "foil", "etched"} else "unconfirmed"
             tray = proposed_bin(self.sorter, card, mode)
             finish = card.get("finish") or "finish unconfirmed"
+            if finish_source == "operator":
+                finish += " (manual)"
             message = (f"{card['name']} {card['set'].upper()} #{card['collector_number']} "
                        f"({finish}) → {tray} [{elapsed} ms]")
         else:
@@ -109,7 +123,8 @@ class HostedPreview(Preview):
             message = f"Review: {reason}"
         self.decision.configure(text=message)
         event = {"utc": datetime.now(timezone.utc).isoformat(), "printing": card,
-                 "mode": mode, "proposed_tray": tray, "result": reason, "elapsed_ms": elapsed}
+                 "finish_source": finish_source, "mode": mode, "proposed_tray": tray,
+                 "result": reason, "elapsed_ms": elapsed}
         with LOG.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event) + "\n")
 
