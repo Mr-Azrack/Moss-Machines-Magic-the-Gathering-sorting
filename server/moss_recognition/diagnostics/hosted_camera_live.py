@@ -128,7 +128,8 @@ class HostedPreview(Preview):
             else:
                 finish_source = "footer" if card.get("finish") in {"nonfoil", "foil", "etched"} else "unconfirmed"
             tray = proposed_bin(self.sorter, card, mode)
-            finish = card.get("finish") or "finish unconfirmed"
+            finish = card.get("finish")
+            finish = finish.title() if finish else "finish unconfirmed"
             if finish_source == "operator":
                 finish += " (manual)"
             message = (f"{card['name']} {card['set'].upper()} #{card['collector_number']} "
