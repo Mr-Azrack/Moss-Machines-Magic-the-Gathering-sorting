@@ -28,16 +28,34 @@ def footer_evidence(lines):
     pairs = []
     for index, (value, score) in enumerate(cleaned):
         m = SET.match(value)
-        if not m:
-            continue
+        if m:
+            set_code, printed_mark = m.group(1).lower(), m.group(2)
+        else:
+            # Some card footers and OCR results fuse the set and language
+            # tokens into adjacent text (for example "SoSEnVincent").
+            compact = re.sub(r"\\s+", "", value)
+            fused = []
+            for language in LANGS.split("|"):
+                start = compact.find(language)
+                if 2 <= start <= 8:
+                    prefix = compact[:start]
+                    if re.fullmatch(r"[A-Z][A-Z0-9]{1,7}", prefix):
+                        fused.append((start, prefix.lower()))
+            if not fused:
+                continue
+            earliest = min(start for start, _ in fused)
+            codes = {code for start, code in fused if start == earliest}
+            if len(codes) != 1:
+                continue
+            set_code, printed_mark = next(iter(codes)), None
         for j in (index - 1, index + 1):
             if not 0 <= j < len(cleaned):
                 continue
             n = NUMBER.fullmatch(cleaned[j][0])
             if n and min(score, cleaned[j][1]) >= 0.72:
                 number = n.group(1).lower().lstrip("0") or "0"
-                mark = MARK.get(m.group(2)) if score >= 0.82 else None
-                pairs.append((m.group(1).lower(), number, mark))
+                mark = MARK.get(printed_mark) if printed_mark and score >= 0.82 else None
+                pairs.append((set_code, number, mark))
     ids = {(a, b) for a, b, _ in pairs}
     if len(ids) != 1:
         return {}, "no_unambiguous_footer_pair"
