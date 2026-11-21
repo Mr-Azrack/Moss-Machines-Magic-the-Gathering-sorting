@@ -595,6 +595,11 @@ class ScannerGUI(BaseSorterGUI):
     def _passes_minimum_confidence(self, card_info):
         if not card_info:
             return False
+        if (card_info.get("recognition_source") == "hosted_ai"
+                and card_info.get("printing_verified") is True
+                and str(card_info.get("product_id") or "").isdigit()
+                and card_info.get("set") and card_info.get("number")):
+            return True
         try:
             confidence = float(card_info.get("confidence", 0) or 0)
         except Exception:
@@ -626,6 +631,8 @@ class ScannerGUI(BaseSorterGUI):
             if callable(original_recognize):
                 def gated_recognize(*args, **kwargs):
                     card_info = original_recognize(*args, **kwargs)
+                    if isinstance(card_info, dict) and card_info.get("_moss_ai_status") in {"review", "unavailable"}:
+                        return card_info
                     if not self._passes_minimum_confidence(card_info):
                         return None
                     return card_info
