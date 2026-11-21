@@ -2571,6 +2571,10 @@ class ScannerGUI:
         # but all other commands require the matched firmware.
         if not self._firmware_verified and cmd not in ("QueryFirmware", "QuerySensors"):
             return None
+        if (self._moss_ai_shadow_mode()
+                and cmd not in ("QueryFirmware", "QuerySensors", "QueryParams")):
+            self.log_status("AI shadow mode blocked hardware command: " + str(cmd), error=True)
+            return None
         with self._arduino_tx_lock:
             try:
                 return self.scanner.send_to_arduino(cmd)
@@ -3032,7 +3036,9 @@ class ScannerGUI:
                 or self._loading_recovery_required or self.machine_parked_for_loading):
             return False
         if self._arduino_connected():
-            return not bool(self.machine_started)
+            return (bool(self._firmware_verified)
+                    and not bool(self.machine_started)
+                    and self.sensor_data.get('started') == 0)
         return True
 
     def _sort_cycle_allowed_for_camera(self):
