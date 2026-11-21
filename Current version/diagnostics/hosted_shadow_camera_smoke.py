@@ -112,7 +112,7 @@ def main():
             elif status in {"review", "unavailable"}:
                 record["reason"] = result.get("_moss_reason", "No candidate")
             print(json.dumps(record, ensure_ascii=False), flush=True)
-            if status == "candidate" or status == "unavailable":
+            if status in {"candidate", "review", "unavailable"}:
                 return 0 if record["status"] == "candidate" else 2
         print(json.dumps({"status": "no_card_detected",
                           "elapsed_ms": round((time.perf_counter() - started) * 1000)}),
