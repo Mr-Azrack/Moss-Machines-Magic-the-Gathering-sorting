@@ -13,6 +13,7 @@ $Files = @(
     'ai_worker.py', 'ai_preflight.py', 'benchmark_ai_worker.py',
     'requirements.txt', 'requirements-ai-worker.txt', 'install_ai_worker.sh',
     'AI_DEPLOYMENT.md', 'README.md', 'export_verified_training.py',
+    'camera_evidence.py', 'diagnostics/capture_evidence.py',
     'diagnostics/hosted_camera_live.py', 'diagnostics/server_ai_lookup.py',
     'diagnostics/hosted_live_lookup.py', 'diagnostics/fixed_height_preview.py',
     'diagnostics/evidence_replay.py', 'diagnostics/read_footer_winrt.ps1',
@@ -55,7 +56,7 @@ try {
     }
     Move-Item -LiteralPath $StageRoot -Destination $InstallRoot
 
-    $InstalledLauncher = Join-Path $InstallRoot 'moss_recognition\\diagnostics\\START_AI_CAMERA_TEST.cmd'
+    $InstalledLauncher = Join-Path $InstallRoot 'moss_recognition\diagnostics\START_AI_CAMERA_TEST.cmd'
     if (-not (Test-Path -LiteralPath $InstalledLauncher -PathType Leaf)) {
         throw 'Installed launcher is missing; remove only the newly created installation folder and retry.'
     }
