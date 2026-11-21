@@ -1,8 +1,12 @@
 $ErrorActionPreference = 'Stop'
 $env:MOSS_AI_SERVER_ENABLED = '1'
-$diagRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$pilotPath = Join-Path $diagRoot 'Foundations_Pilot'
-$env:PYTHONPATH = if ($env:PYTHONPATH) { $pilotPath + [IO.Path]::PathSeparator + $env:PYTHONPATH } else { $pilotPath }
+$recognitionRoot = Split-Path -Parent $PSScriptRoot
+$installRoot = Split-Path -Parent $recognitionRoot
+$diagnosticsRoot = Split-Path -Parent $installRoot
+$pilotPath = Join-Path $diagnosticsRoot 'Foundations_Pilot'
+$pythonPaths = @($recognitionRoot, $pilotPath, $PSScriptRoot)
+if ($env:PYTHONPATH) { $pythonPaths += $env:PYTHONPATH }
+$env:PYTHONPATH = $pythonPaths -join [IO.Path]::PathSeparator
 $secretFile = Join-Path $env:LOCALAPPDATA 'MOSS\Hosted\lookup.dpapi'
 if (-not (Test-Path -LiteralPath $secretFile)) { throw 'MOSS lookup credential not configured on this PC.' }
 $secret = Get-Content -LiteralPath $secretFile | ConvertTo-SecureString
