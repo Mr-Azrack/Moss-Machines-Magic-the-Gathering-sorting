@@ -47,16 +47,21 @@ class HostedPreview(Preview):
         self.generation = 0
         self.submitted = False
         self.mode = tk.StringVar(value="color")
-        self.finish_confirmed = tk.BooleanVar(value=False)
-        self.manual_foil = tk.BooleanVar(value=False)
+        self.manual_finish = tk.StringVar(value="Unconfirmed")
+        self._last_lookup = None
         strip = ttk.Frame(root, padding=8)
         strip.pack(fill="x")
         ttk.Label(strip, text="Tray rule").pack(side="left")
-        ttk.Combobox(strip, textvariable=self.mode, values=("color", "finish", "set"),
-                     state="readonly", width=12).pack(side="left", padx=8)
+        mode_box = ttk.Combobox(strip, textvariable=self.mode, values=("color", "finish", "set"),
+                                state="readonly", width=12)
+        mode_box.pack(side="left", padx=8)
+        mode_box.bind("<<ComboboxSelected>>", self.refresh_result)
         ttk.Label(strip, text="Manual finish").pack(side="left", padx=(12, 4))
-        ttk.Checkbutton(strip, text="Confirmed", variable=self.finish_confirmed).pack(side="left")
-        ttk.Checkbutton(strip, text="Foil", variable=self.manual_foil).pack(side="left")
+        finish_box = ttk.Combobox(strip, textvariable=self.manual_finish,
+                                  values=("Unconfirmed", "Nonfoil", "Foil", "Etched"),
+                                  state="readonly", width=14)
+        finish_box.pack(side="left")
+        finish_box.bind("<<ComboboxSelected>>", self.refresh_result)
         self.decision = ttk.Label(root, text="Place one card in view", wraplength=660, padding=(8, 0, 8, 8))
         self.decision.pack(fill="x")
         root.after(175, self.check_lookup)
@@ -70,6 +75,8 @@ class HostedPreview(Preview):
             if self.clear == 3:
                 self.submitted = False
                 self.generation += 1
+                self._last_lookup = None
+                self.manual_finish.set("Unconfirmed")
         else:
             self.clear = 0
             stamp = cv2.resize(cv2.cvtColor(current.image, cv2.COLOR_BGR2GRAY), (40, 56))
@@ -103,12 +110,20 @@ class HostedPreview(Preview):
         if self.lookup_generation != self.generation:
             self.decision.configure(text="Card moved during lookup. Place it back to retry.")
             return
+        self._last_lookup = (dict(card) if card else None, reason, elapsed)
+        self.refresh_result(event_type="scan")
+
+    def refresh_result(self, _event=None, event_type="operator_update"):
+        if self._last_lookup is None:
+            return
+        card, reason, elapsed = self._last_lookup
         mode = self.mode.get()
         finish_source = None
         if card:
             card = dict(card)
-            if self.finish_confirmed.get():
-                card["finish"] = "foil" if self.manual_foil.get() else "nonfoil"
+            manual_finish = self.manual_finish.get().lower()
+            if manual_finish in {"nonfoil", "foil", "etched"}:
+                card["finish"] = manual_finish
                 finish_source = "operator"
             else:
                 finish_source = "footer" if card.get("finish") in {"nonfoil", "foil", "etched"} else "unconfirmed"
@@ -122,11 +137,12 @@ class HostedPreview(Preview):
             tray = "Hold" if reason.startswith("Hold:") else "RejectCard"
             message = f"Review: {reason}"
         self.decision.configure(text=message)
-        event = {"utc": datetime.now(timezone.utc).isoformat(), "printing": card,
-                 "finish_source": finish_source, "mode": mode, "proposed_tray": tray,
-                 "result": reason, "elapsed_ms": elapsed}
-        with LOG.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event) + "\n")
+        if event_type:
+            event = {"utc": datetime.now(timezone.utc).isoformat(), "event_type": event_type,
+                     "printing": card, "finish_source": finish_source, "mode": mode,
+                     "proposed_tray": tray, "result": reason, "elapsed_ms": elapsed}
+            with LOG.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event) + "\\n")
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
