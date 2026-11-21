@@ -14,6 +14,7 @@ INCLUDE = (
     "diagnostics/hosted_live_lookup.py", "diagnostics/fixed_height_preview.py",
     "diagnostics/evidence_replay.py", "diagnostics/read_footer_winrt.ps1",
     "diagnostics/START_AI_CAMERA_TEST.cmd", "diagnostics/START_AI_CAMERA_TEST.ps1",
+    "diagnostics/install_ai_camera_test.ps1",
 )
 
 
