@@ -15,7 +15,7 @@ from urllib.request import Request, build_opener
 from hosted_live_lookup import LookupUnavailable, NoRedirect, proposed_bin, tight_camera_image
 from PIL import Image
 
-ENDPOINT = "https://cardsorter.thegamestationlw.com/api/v1/recognize-image"
+ENDPOINT = os.environ.get("MOSS_AI_ENDPOINT", "https://vps143818.inmotionhosting.com/api/v1/recognize-image")
 
 
 class HostedLookup:
