@@ -142,7 +142,7 @@ class HostedPreview(Preview):
                      "printing": card, "finish_source": finish_source, "mode": mode,
                      "proposed_tray": tray, "result": reason, "elapsed_ms": elapsed}
             with LOG.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(event) + "\\n")
+                stream.write(json.dumps(event) + "\n")
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
