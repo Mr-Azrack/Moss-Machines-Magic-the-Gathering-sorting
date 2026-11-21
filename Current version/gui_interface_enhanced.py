@@ -3261,6 +3261,10 @@ class ScannerGUI:
                         self.log_error('E305', str(e))
 
             plugin_status = plugin_info.get("_moss_ai_status") if isinstance(plugin_info, dict) else None
+            if hosted_required and plugin_status not in {"candidate", "review", "unavailable"}:
+                plugin_status = "unavailable"
+                plugin_info = {"_moss_ai_status": "unavailable",
+                               "_moss_reason": "Hosted recognizer returned no verified result"}
             if hosted_required and plugin_status == "unavailable":
                 reason = plugin_info.get("_moss_reason") or "Hosted recognition is unavailable"
                 self.auto_scan = False
@@ -3279,6 +3283,8 @@ class ScannerGUI:
                 reject_reason = plugin_info.get("_moss_reason") or "Hosted recognition needs review"
             else:
                 card_info = self.scanner._process_card_from_contour(frame, card_approx)
+                if not isinstance(card_info, dict):
+                    card_info = None
                 if hosted_required and plugin_status == "candidate":
                     hosted_card = {key: value for key, value in plugin_info.items()
                                    if not key.startswith("_") and key not in {"_moss_ai_ms"}}
@@ -3364,7 +3370,10 @@ class ScannerGUI:
                 sorting_mode_check = self.sorting_var.get()
                 missing_route_data = (
                     (sorting_mode_check == "color" and card_info.get("colors") is None)
-                    or (sorting_mode_check in {"price", "buy"} and not card_info.get("market_price"))
+                    or (sorting_mode_check == "mana_value" and card_info.get("mana_value") is None)
+                    or (sorting_mode_check == "type" and not card_info.get("type"))
+                    or (sorting_mode_check == "rarity" and not card_info.get("rarity"))
+                    or (sorting_mode_check in {"price", "buy"} and card_info.get("market_price") is None)
                     or (sorting_mode_check == "finish" and card_info.get("actual_finish") not in {"foil", "nonfoil"})
                 )
                 if missing_route_data:
