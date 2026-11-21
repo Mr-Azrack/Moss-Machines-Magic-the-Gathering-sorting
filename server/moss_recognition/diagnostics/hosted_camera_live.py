@@ -35,7 +35,7 @@ def get_sorter_rules():
 class HostedPreview(Preview):
     def __init__(self, root, camera, hosted, sorter):
         super().__init__(root, camera)
-        root.title("MOSS Hosted Camera Test")
+        root.title("MOSS AI Camera Test" if os.environ.get("MOSS_AI_SERVER_ENABLED") == "1" else "MOSS Hosted Camera Test")
         self.save_button.pack_forget()
         self.lookup = hosted
         self.sorter = sorter
