@@ -3268,6 +3268,10 @@ class ScannerGUI:
             if hosted_required and plugin_status == "unavailable":
                 reason = plugin_info.get("_moss_reason") or "Hosted recognition is unavailable"
                 self.auto_scan = False
+                try:
+                    self.auto_scan_var.set(False)
+                except Exception:
+                    pass
                 self.detection_info = {"status": "hold",
                                        "message": "Recognition unavailable; feeding paused",
                                        "bin": "Hold"}
