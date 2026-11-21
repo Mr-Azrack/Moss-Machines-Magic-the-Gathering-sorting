@@ -671,7 +671,7 @@ class OptimizedCardScanner:
             return "Foil" if is_foil.lower() in ["true", "yes", "foil"] else "Nonfoil"
         return "Nonfoil"  # Legacy non-hosted default
 
-        def get_bin_number(self, card_info, mode, threshold=1000000):
+    def get_bin_number(self, card_info, mode, threshold=1000000):
         """
         Get bin number for card based on sorting mode
         Modes: color, mana_value, set, price, type, buy, alpha, rarity, finish
