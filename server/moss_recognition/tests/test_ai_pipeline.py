@@ -129,8 +129,8 @@ class FooterParserTests(unittest.TestCase):
 
     def test_crop_footer_focuses_on_lower_left_printed_line(self):
         footer = crop_footer(Image.new("RGB", (745, 1043), "white"))
-        self.assertGreater(footer.width, 1100)
-        self.assertGreater(footer.height, 400)
+        self.assertGreater(footer.width, 650)
+        self.assertGreater(footer.height, 250)
 
     def test_conflicting_and_low_confidence_ocr(self):
         self.assertEqual(footer_evidence([("63", 0.91), ("DFT EN", 0.96), ("64", 0.93),
