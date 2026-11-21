@@ -67,20 +67,34 @@ def footer_evidence(lines):
     return evidence, None
 
 
-def crop_footer(image):
+def prepare_footer_crop(image, box, target_width, *, binary=False):
+    footer = ImageOps.grayscale(image.crop(box))
+    scale = min(4.6, target_width / max(1, footer.width))
+    enlarged = ImageOps.autocontrast(
+        footer.resize((max(1, round(footer.width * scale)),
+                       max(1, round(footer.height * scale))), Image.Resampling.LANCZOS),
+        cutoff=1)
+    if binary:
+        enlarged = enlarged.point(lambda value: 255 if value >= 135 else 0)
+    return ImageOps.expand(enlarged, border=16, fill=0)
+
+
+def footer_probes(image):
     image = ImageOps.exif_transpose(image)
     if image.width > image.height:
         image = image.transpose(Image.Transpose.ROTATE_90)
     w, h = image.size
-    # Use the validated tight footer probe: collector number above set/language,
-    # away from adjacent artwork and copyright text. The sorter crop is margin-free.
-    footer = image.crop((round(w * 0.015), round(h * 0.934),
-                         round(w * 0.22), h))
-    scale = min(4.6, 680.0 / max(1, footer.width))
-    enlarged = ImageOps.grayscale(footer).resize(
-        (max(1, round(footer.width * scale)), max(1, round(footer.height * scale))),
-        Image.Resampling.LANCZOS)
-    return ImageOps.expand(ImageOps.autocontrast(enlarged, cutoff=1), border=16, fill=0)
+    # Broad for standard catalog photos; tight gray and thresholded for the
+    # small physical MOSS footer. Only OCR results are retained, never the image.
+    broad = prepare_footer_crop(image, (0, round(h * 0.79), round(w * 0.64), h), 1150)
+    tight_box = (round(w * 0.015), round(h * 0.934), round(w * 0.22), h)
+    tight = prepare_footer_crop(image, tight_box, 680)
+    binary = prepare_footer_crop(image, tight_box, 680, binary=True)
+    return broad, tight, binary
+
+
+def crop_footer(image):
+    return footer_probes(image)[1]
 
 
 class PaddleFooterModel:
@@ -99,23 +113,39 @@ class PaddleFooterModel:
 
     def predict(self, image):
         import numpy as np
-        roi = crop_footer(image)
-        results = self.model.predict(np.asarray(roi.convert("RGB")))
-        lines = []
-        for item in results:
-            data = item.json
-            if "res" in data:
-                data = data["res"]
-            for text, score, box in zip(data.get("rec_texts", []),
-                                        data.get("rec_scores", []),
-                                        data.get("rec_boxes", [])):
-                try:
-                    y = (float(box[1]) + float(box[3])) / 2
-                except (IndexError, TypeError, ValueError):
-                    continue
-                lines.append((y, str(text), float(score)))
-        lines.sort(key=lambda item: item[0])
-        evidence, reason = footer_evidence([(text, score) for _, text, score in lines])
+        votes = []
+        for roi in footer_probes(image):
+            results = self.model.predict(np.asarray(roi.convert("RGB")))
+            lines = []
+            for item in results:
+                data = item.json
+                if "res" in data:
+                    data = data["res"]
+                for text, score, box in zip(data.get("rec_texts", []),
+                                            data.get("rec_scores", []),
+                                            data.get("rec_boxes", [])):
+                    try:
+                        y = (float(box[1]) + float(box[3])) / 2
+                    except (IndexError, TypeError, ValueError):
+                        continue
+                    lines.append((y, str(text), float(score)))
+            lines.sort(key=lambda item: item[0])
+            evidence, _ = footer_evidence([(text, score) for _, text, score in lines])
+            if evidence:
+                votes.append(evidence)
+        if not votes:
+            return {"engine": "paddleocr", "evidence": {},
+                    "review_reason": "no_unambiguous_footer_pair"}
+        identities = {(row["set_abbreviation"], row["collector_number"]) for row in votes}
+        if len(identities) != 1:
+            return {"engine": "paddleocr", "evidence": {},
+                    "review_reason": "conflicting_footer_probes"}
+        set_code, number = next(iter(identities))
+        evidence = {"set_abbreviation": set_code, "collector_number": number}
+        marks = {row.get("foil_mark") for row in votes if row.get("foil_mark")}
+        if len(marks) == 1:
+            evidence["foil_mark"] = next(iter(marks))
+        reason = "conflicting_foil_marks" if len(marks) > 1 else None
         return {"engine": "paddleocr", "evidence": evidence, "review_reason": reason}
 
 
