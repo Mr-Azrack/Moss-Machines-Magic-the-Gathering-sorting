@@ -10,7 +10,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ai_image_api import ImageRequestError, load_image, recognize_image
-from ai_worker import footer_evidence
+from ai_worker import crop_footer, footer_evidence
 
 
 def sample():
@@ -121,6 +121,16 @@ class FooterParserTests(unittest.TestCase):
                                             ("SoSEnVincent Christiaens", 0.868)])
         self.assertIsNone(reason)
         self.assertEqual(evidence, {"set_abbreviation": "sos", "collector_number": "194"})
+
+    def test_fused_set_language_with_internal_spaces(self):
+        evidence, reason = footer_evidence([("194", 0.97), ("S O S E N", 0.95)])
+        self.assertIsNone(reason)
+        self.assertEqual(evidence, {"set_abbreviation": "sos", "collector_number": "194"})
+
+    def test_crop_footer_focuses_on_lower_left_printed_line(self):
+        footer = crop_footer(Image.new("RGB", (745, 1043), "white"))
+        self.assertGreater(footer.width, 1100)
+        self.assertGreater(footer.height, 400)
 
     def test_conflicting_and_low_confidence_ocr(self):
         self.assertEqual(footer_evidence([("63", 0.91), ("DFT EN", 0.96), ("64", 0.93),
