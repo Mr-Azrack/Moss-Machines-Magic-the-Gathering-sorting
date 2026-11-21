@@ -17,7 +17,7 @@ from .base import RecognitionPluginBase
 
 _DIAGNOSTICS = os.environ.get(
     "MOSS_AI_DIAGNOSTICS_PATH",
-    r"D:\\MOSS_Diagnostics\\MOSS_AI_Camera_Test\\moss_recognition\\diagnostics",
+    r"D:\MOSS_Diagnostics\MOSS_AI_Camera_Test\moss_recognition\diagnostics",
 )
 _KEY_RE = re.compile(r"[0-9a-f]{64}", re.I)
 _COLOR_NAMES = {
