@@ -69,9 +69,14 @@ class PaddleFooterModel:
         from paddleocr import PaddleOCR
         self.model = PaddleOCR(
             lang="en", device="cpu",
+            text_detection_model_name="PP-OCRv5_mobile_det",
+            text_recognition_model_name="en_PP-OCRv5_mobile_rec",
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False)
+        # Run one warm-up so the first physical card does not pay model startup cost.
+        self.predict(Image.new("RGB", (800, 1200), "white"))
+        print("MOSS PaddleOCR warm-up complete", flush=True)
 
     def predict(self, image):
         import numpy as np
