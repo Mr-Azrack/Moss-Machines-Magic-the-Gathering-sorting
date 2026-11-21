@@ -3220,6 +3220,7 @@ class ScannerGUI:
             return
         try:
             scan_image_path = None
+            warped = None
             try:
                 warped = self.scanner._get_perspective_corrected_card(frame, card_approx)
                 if warped is not None:
@@ -3241,42 +3242,91 @@ class ScannerGUI:
             except Exception as _e:
                 scan_image_path = None
 
-            # A plugin may supply an OCR/recognition opinion, but it cannot
-            # bypass the built-in pHash + printing-identity safety gate.
+            hosted_required = os.environ.get('MOSS_AI_SORTING_ENABLED') == '1'
             plugin_info = None
-            if getattr(self, 'recognition_plugin', None):
+            review_path = False
+            if hosted_required and not getattr(self, 'recognition_plugin', None):
+                plugin_info = {"_moss_ai_status": "unavailable",
+                               "_moss_reason": "Hosted recognition plugin is not loaded"}
+            elif getattr(self, 'recognition_plugin', None):
                 try:
-                    plugin_info = self.recognition_plugin.recognize(frame, card_approx, self.scanner)
+                    plugin_info = self.recognition_plugin.recognize(
+                        frame, card_approx, self.scanner, warped)
                 except Exception as e:
-                    self.log_status(f"Recognition plugin error: {e}", error=True)
-                    self.log_error('E305', str(e))
+                    if hosted_required:
+                        plugin_info = {"_moss_ai_status": "unavailable",
+                                       "_moss_reason": f"Hosted recognition failed ({type(e).__name__})"}
+                    else:
+                        self.log_status(f"Recognition plugin error: {e}", error=True)
+                        self.log_error('E305', str(e))
 
-            card_info = self.scanner._process_card_from_contour(frame, card_approx)
+            plugin_status = plugin_info.get("_moss_ai_status") if isinstance(plugin_info, dict) else None
+            if hosted_required and plugin_status == "unavailable":
+                reason = plugin_info.get("_moss_reason") or "Hosted recognition is unavailable"
+                self.auto_scan = False
+                self.detection_info = {"status": "hold",
+                                       "message": "Recognition unavailable; feeding paused",
+                                       "bin": "Hold"}
+                self.log_status("Recognition service unavailable; pausing the sorter: " + str(reason), error=True)
+                if self._arduino_connected() and getattr(self, "machine_started", False):
+                    self.root.after(0, self.stop_machine)
+                return
+
             reject_reason = getattr(self.scanner, 'last_identification_reject_reason', None)
-            if card_info and plugin_info:
-                if not isinstance(plugin_info, dict):
-                    reject_reason = 'recognition_plugin_invalid_response'
-                    card_info = None
-                else:
-                    # A disagreement means we do not know which product is right.
-                    # Do NOT write inventory/history or command a normal tray.
-                    expected_id = str(card_info.get('product_id') or '')
-                    plugin_id = str(plugin_info.get('product_id') or plugin_info.get('UniqueID') or '')
-                    expected_set = str(card_info.get('set') or '').upper()
-                    plugin_set = str(plugin_info.get('set') or plugin_info.get('set_code') or '').upper()
-                    if not plugin_id or plugin_id != expected_id or (plugin_set and plugin_set != expected_set):
-                        reject_reason = 'recognition_plugin_disagrees'
+            card_info = None
+            if hosted_required and plugin_status == "review":
+                review_path = True
+                reject_reason = plugin_info.get("_moss_reason") or "Hosted recognition needs review"
+            else:
+                card_info = self.scanner._process_card_from_contour(frame, card_approx)
+                if hosted_required and plugin_status == "candidate":
+                    hosted_card = {key: value for key, value in plugin_info.items()
+                                   if not key.startswith("_") and key not in {"_moss_ai_ms"}}
+                    if not hosted_card.get("printing_verified"):
                         card_info = None
+                        review_path = True
+                        reject_reason = "Hosted candidate failed the printing-verification gate"
+                    elif card_info:
+                        local_id = str(card_info.get("product_id") or card_info.get("UniqueID") or "")
+                        local_set = str(card_info.get("set") or card_info.get("set_code") or "").lower()
+                        local_number = str(card_info.get("number") or card_info.get("collector_number") or "").lower()
+                        if (local_id != hosted_card.get("product_id")
+                                or local_set != str(hosted_card.get("set") or "").lower()
+                                or local_number.lstrip("0") != str(hosted_card.get("number") or "").lower().lstrip("0")):
+                            card_info = None
+                            review_path = True
+                            reject_reason = "Hosted and local printing identities disagree"
+                        else:
+                            merged = dict(card_info)
+                            merged.update({key: value for key, value in hosted_card.items() if value is not None})
+                            card_info = merged
+                    else:
+                        card_info = hosted_card
+                elif card_info and plugin_info:
+                    if not isinstance(plugin_info, dict):
+                        reject_reason = 'recognition_plugin_invalid_response'
+                        card_info = None
+                    else:
+                        expected_id = str(card_info.get('product_id') or '')
+                        plugin_id = str(plugin_info.get('product_id') or plugin_info.get('UniqueID') or '')
+                        expected_set = str(card_info.get('set') or '').upper()
+                        plugin_set = str(plugin_info.get('set') or plugin_info.get('set_code') or '').upper()
+                        if not plugin_id or plugin_id != expected_id or (plugin_set and plugin_set != expected_set):
+                            reject_reason = 'recognition_plugin_disagrees'
+                            card_info = None
 
             if not card_info:
-                if not self._sort_cycle_allowed_for_camera():
-                    self.log_status("Discarded rejected recognition: sorter paused")
-                    return
                 reason = reject_reason or 'Identification inconclusive'
-                self.detection_info = {'status': 'reject', 'message': reason, 'bin': 'RejectCard'}
-                self.log_status(f"⊗ Card sent to reject: {reason}", error=True)
-                if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
-                    self._send_arduino("RejectCard")
+                if review_path or hosted_required:
+                    self._route_card_to_review(reason)
+                else:
+                    if not self._sort_cycle_allowed_for_camera():
+                        self.log_status("Discarded rejected recognition: sorter paused")
+                        return
+                    self.detection_info = {'status': 'reject', 'message': reason, 'bin': 'RejectCard'}
+                    self.log_status(f"⊗ Card sent to reject: {reason}", error=True)
+                    if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
+                        self._send_arduino("RejectCard")
                 return
 
             # Attach scan image path + backend to card_info for persistence
@@ -3310,6 +3360,17 @@ class ScannerGUI:
             except Exception:
                 pass
             
+            if hosted_required:
+                sorting_mode_check = self.sorting_var.get()
+                missing_route_data = (
+                    (sorting_mode_check == "color" and card_info.get("colors") is None)
+                    or (sorting_mode_check in {"price", "buy"} and not card_info.get("market_price"))
+                    or (sorting_mode_check == "finish" and card_info.get("actual_finish") not in {"foil", "nonfoil"})
+                )
+                if missing_route_data:
+                    self._route_card_to_review("Required bin data is missing or the finish is unconfirmed")
+                    return
+
             # After OCR/pHash finishes, recheck that STOP or LOAD hasn't
             # invalidated this card. check_inventory() has write side effects.
             if not self._sort_cycle_allowed_for_camera():
@@ -3363,6 +3424,17 @@ class ScannerGUI:
         except Exception as e:
             self.log_error('E304', str(e))
     
+    def _route_card_to_review(self, reason):
+        """Use the existing reject chute as the operator review path."""
+        if not self._sort_cycle_allowed_for_camera():
+            self.detection_info = {"status": "review", "message": reason, "bin": "Review"}
+            self.log_status("Card held for review while the sorter is paused: " + str(reason), error=True)
+            return
+        self.detection_info = {"status": "review", "message": reason, "bin": "RejectCard"}
+        self.log_status("Card routed to review chute: " + str(reason), error=True)
+        if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
+            self._send_arduino("RejectCard")
+
     def _draw_detection_info(self, frame, info):
         """Draw info on frame"""
         # Defensive: `info` may be None or may not contain all expected keys.
