@@ -34,7 +34,7 @@ def _lookup_key():
         return ""
     script = r"""
 $ErrorActionPreference = 'Stop'
-$file = Join-Path $env:LOCALAPPDATA 'MOSS\\Hosted\\lookup.dpapi'
+$file = Join-Path $env:LOCALAPPDATA 'MOSS\Hosted\lookup.dpapi'
 $secure = Get-Content -LiteralPath $file | ConvertTo-SecureString
 $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
 try { [Console]::Write([Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)) }
