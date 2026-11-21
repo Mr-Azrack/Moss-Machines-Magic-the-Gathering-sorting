@@ -3019,6 +3019,22 @@ class ScannerGUI:
             msg, color = "Auto-Scan: OFFLINE RECOGNITION", '#4CAF50'
         self.scan_mode_label.configure(text=msg, fg=color)
 
+    def _moss_ai_shadow_mode(self):
+        """True only for the explicitly opt-in, no-motion AI validation mode."""
+        return (os.environ.get('MOSS_AI_SORTING_ENABLED') == '1'
+                and os.environ.get('MOSS_AI_SHADOW_MODE') == '1')
+
+    def _recognition_cycle_allowed(self):
+        """Allow shadow scans only with the sorter stopped and motion state certain."""
+        if not self._moss_ai_shadow_mode():
+            return self._sort_cycle_allowed_for_camera()
+        if (self._loading_motion_active or self._loading_position_uncertain
+                or self._loading_recovery_required or self.machine_parked_for_loading):
+            return False
+        if self._arduino_connected():
+            return not bool(self.machine_started)
+        return True
+
     def _sort_cycle_allowed_for_camera(self):
         """No automatic scan, inventory write or tray command unless sorting is armed.
 
@@ -3076,7 +3092,7 @@ class ScannerGUI:
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 # Only start a scan if cooldown has passed and no scan in progress.
-                if (self.auto_scan and self._sort_cycle_allowed_for_camera()
+                if (self.auto_scan and self._recognition_cycle_allowed()
                         and (time.time() - self.last_scan_time) > self.scan_cooldown
                         and not getattr(self, '_scan_in_progress', False)):
                     # Show immediate UI feedback that scanning will occur
@@ -3215,12 +3231,13 @@ class ScannerGUI:
     
     def _perform_scan(self, frame, card_approx):
         """Scan card"""
-        if not self._sort_cycle_allowed_for_camera():
+        if not self._recognition_cycle_allowed():
             self.log_status("Scanner paused: machine stopped, parked or unverified", error=True)
             return
         try:
             scan_image_path = None
             warped = None
+            shadow_mode = self._moss_ai_shadow_mode()
             try:
                 warped = self.scanner._get_perspective_corrected_card(frame, card_approx)
                 if warped is not None:
@@ -3231,7 +3248,7 @@ class ScannerGUI:
                         h, w = warped.shape[:2]
 
                     # Final sanity: vertical required
-                    if h > w:
+                    if h > w and not shadow_mode:
                         scans_dir = os.path.join('Collection', 'ScanImages')
                         os.makedirs(scans_dir, exist_ok=True)
                         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -3276,7 +3293,8 @@ class ScannerGUI:
                                        "message": "Recognition unavailable; feeding paused",
                                        "bin": "Hold"}
                 self.log_status("Recognition service unavailable; pausing the sorter: " + str(reason), error=True)
-                if self._arduino_connected() and getattr(self, "machine_started", False):
+                if (not shadow_mode and self._arduino_connected()
+                    and getattr(self, "machine_started", False)):
                     self.root.after(0, self.stop_machine)
                 return
 
@@ -3386,10 +3404,10 @@ class ScannerGUI:
 
             # After OCR/pHash finishes, recheck that STOP or LOAD hasn't
             # invalidated this card. check_inventory() has write side effects.
-            if not self._sort_cycle_allowed_for_camera():
+            if not shadow_mode and not self._sort_cycle_allowed_for_camera():
                 self.log_status("Discarding stale recognition; sorter paused")
                 return
-            if self.scanner.track_inventory:
+            if self.scanner.track_inventory and not shadow_mode:
                 card_info = self.scanner.check_inventory(card_info)
                 if card_info == "RejectCard":
                     if not self._sort_cycle_allowed_for_camera():
@@ -3418,6 +3436,14 @@ class ScannerGUI:
             
             self.log_status(f"✓ {name} ({game}) {confidence:.1f}% → {bin_result}")
             
+            if shadow_mode:
+                self.detection_info = {
+                    'status': 'shadow', 'card': card_info,
+                    'bin': bin_result, 'sorting_mode': sorting_mode
+                }
+                self.log_status(f"AI SHADOW: {name} ({game}) → {bin_result}; no inventory or motion")
+                return
+
             # Even when an image was recognized, STOP/LOAD may have happened
             # while computing bins. Never send a tray command in that state.
             if not self._sort_cycle_allowed_for_camera():
@@ -3439,6 +3465,10 @@ class ScannerGUI:
     
     def _route_card_to_review(self, reason):
         """Use the existing reject chute as the operator review path."""
+        if self._moss_ai_shadow_mode():
+            self.detection_info = {"status": "review", "message": reason, "bin": "Review"}
+            self.log_status("AI shadow review: " + str(reason), error=True)
+            return
         if not self._sort_cycle_allowed_for_camera():
             self.detection_info = {"status": "review", "message": reason, "bin": "Review"}
             self.log_status("Card held for review while the sorter is paused: " + str(reason), error=True)
@@ -3457,7 +3487,7 @@ class ScannerGUI:
         status = info.get('status')
         bin_val = info.get('bin', None)
 
-        if status == 'success':
+        if status in {'success', 'shadow'}:
             card = info.get('card', {}) or {}
             y = 70
             cv2.putText(frame, f"Card: {card.get('name', 'Unknown')}", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -3490,7 +3520,9 @@ class ScannerGUI:
                 except Exception:
                     pass
             if bin_val is not None:
-                cv2.putText(frame, f"BIN: {bin_val}", (10, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+                label = "SHADOW BIN" if status == 'shadow' else "BIN"
+                color = (0, 255, 255) if status == 'shadow' else (0, 255, 0)
+                cv2.putText(frame, f"{label}: {bin_val}", (10, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
         else:
             msg = (info.get('message') or 'Error').upper()
             cv2.putText(frame, msg, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
