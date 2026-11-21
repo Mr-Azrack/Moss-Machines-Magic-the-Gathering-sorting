@@ -28,7 +28,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from catalog_match import ALGORITHM, CatalogIndex, parse_evidence, parse_hashes
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_BYTES = 3 * 1024 * 1024
 MAX_PIXELS = 9_000_000
