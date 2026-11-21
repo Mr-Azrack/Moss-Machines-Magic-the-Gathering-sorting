@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+private_data/
+scan_images/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
