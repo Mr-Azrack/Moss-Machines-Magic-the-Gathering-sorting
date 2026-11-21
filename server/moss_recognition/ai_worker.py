@@ -72,11 +72,11 @@ def crop_footer(image):
     if image.width > image.height:
         image = image.transpose(Image.Transpose.ROTATE_90)
     w, h = image.size
-    # The physical camera crop places the set and collector line in the
-    # lower-left footer. Match the validated Windows footer probe so artwork
-    # and copyright text do not dominate PaddleOCR's detection step.
-    footer = image.crop((0, round(h * 0.865), round(w * 0.5), h))
-    scale = min(3.0, 1150.0 / max(1, footer.width))
+    # Use the validated tight footer probe: collector number above set/language,
+    # away from adjacent artwork and copyright text. The sorter crop is margin-free.
+    footer = image.crop((round(w * 0.015), round(h * 0.934),
+                         round(w * 0.22), h))
+    scale = min(4.6, 680.0 / max(1, footer.width))
     enlarged = ImageOps.grayscale(footer).resize(
         (max(1, round(footer.width * scale)), max(1, round(footer.height * scale))),
         Image.Resampling.LANCZOS)
