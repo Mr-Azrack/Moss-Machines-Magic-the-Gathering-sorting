@@ -33,7 +33,7 @@ def footer_evidence(lines):
         else:
             # Some card footers and OCR results fuse the set and language
             # tokens into adjacent text (for example "SoSEnVincent").
-            compact = re.sub(r"\\s+", "", value)
+            compact = re.sub(r"\s+", "", value)
             fused = []
             for language in LANGS.split("|"):
                 start = compact.find(language)
@@ -72,14 +72,15 @@ def crop_footer(image):
     if image.width > image.height:
         image = image.transpose(Image.Transpose.ROTATE_90)
     w, h = image.size
-    # Keep the bottom edge and the physical set/number line. The PC sends
-    # a tight crop; do not remove printed pixels or enforce an outside margin.
-    footer = image.crop((0, round(h * 0.79), round(w * 0.64), h))
+    # The physical camera crop places the set and collector line in the
+    # lower-left footer. Match the validated Windows footer probe so artwork
+    # and copyright text do not dominate PaddleOCR's detection step.
+    footer = image.crop((0, round(h * 0.865), round(w * 0.5), h))
     scale = min(3.0, 1150.0 / max(1, footer.width))
-    return ImageOps.autocontrast(
-        ImageOps.grayscale(footer).resize(
-            (max(1, round(footer.width * scale)), max(1, round(footer.height * scale))),
-            Image.Resampling.LANCZOS))
+    enlarged = ImageOps.grayscale(footer).resize(
+        (max(1, round(footer.width * scale)), max(1, round(footer.height * scale))),
+        Image.Resampling.LANCZOS)
+    return ImageOps.expand(ImageOps.autocontrast(enlarged, cutoff=1), border=16, fill=0)
 
 
 class PaddleFooterModel:
