@@ -8,9 +8,22 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
-$Launcher = Join-Path $SourceRoot 'diagnostics\\START_AI_CAMERA_TEST.cmd'
-if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
-    throw "The AI camera test launcher is missing from $SourceRoot"
+$Files = @(
+    'server.py', 'passenger_wsgi.py', 'catalog_match.py', 'ai_image_api.py',
+    'ai_worker.py', 'ai_preflight.py', 'benchmark_ai_worker.py',
+    'requirements.txt', 'requirements-ai-worker.txt', 'install_ai_worker.sh',
+    'AI_DEPLOYMENT.md', 'README.md', 'export_verified_training.py',
+    'diagnostics/hosted_camera_live.py', 'diagnostics/server_ai_lookup.py',
+    'diagnostics/hosted_live_lookup.py', 'diagnostics/fixed_height_preview.py',
+    'diagnostics/evidence_replay.py', 'diagnostics/read_footer_winrt.ps1',
+    'diagnostics/START_AI_CAMERA_TEST.cmd', 'diagnostics/START_AI_CAMERA_TEST.ps1',
+    'diagnostics/install_ai_camera_test.ps1'
+)
+$Missing = @($Files | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path $SourceRoot $_) -PathType Leaf)
+})
+if ($Missing.Count -gt 0) {
+    throw ('Required camera-test source files are missing: ' + ($Missing -join ', '))
 }
 if (Test-Path -LiteralPath $InstallRoot) {
     throw "Install folder already exists; preserving it: $InstallRoot"
@@ -31,7 +44,15 @@ try {
     New-Item -ItemType Directory -Path $StageRoot | Out-Null
     $PackageRoot = Join-Path $StageRoot 'moss_recognition'
     New-Item -ItemType Directory -Path $PackageRoot | Out-Null
-    Copy-Item -Path (Join-Path $SourceRoot '*') -Destination $PackageRoot -Recurse -Force
+    foreach ($RelativePath in $Files) {
+        $SourcePath = Join-Path $SourceRoot $RelativePath
+        $DestinationPath = Join-Path $PackageRoot $RelativePath
+        $DestinationDirectory = Split-Path -Parent $DestinationPath
+        if (-not (Test-Path -LiteralPath $DestinationDirectory)) {
+            New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath
+    }
     Move-Item -LiteralPath $StageRoot -Destination $InstallRoot
 
     $InstalledLauncher = Join-Path $InstallRoot 'moss_recognition\\diagnostics\\START_AI_CAMERA_TEST.cmd'
