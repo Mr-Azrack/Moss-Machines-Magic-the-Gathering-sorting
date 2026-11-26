@@ -33,13 +33,16 @@ mkdir -p "$INSTALL_DIR" "$CACHE_DIR"
 chmod 700 "$INSTALL_DIR" "$CACHE_DIR"
 "$PYTHON" -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/python" -m pip install --upgrade pip
+# Install official CPU-only PyTorch wheels for the set-symbol CNN.
+"$INSTALL_DIR/venv/bin/python" -m pip install torch torchvision \
+  --index-url https://download.pytorch.org/whl/cpu
 # Pin CPU Paddle runtime before installing the OCR Python package.
 "$INSTALL_DIR/venv/bin/python" -m pip install \
   paddlepaddle==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 "$INSTALL_DIR/venv/bin/python" -m pip install \
   -r "$SOURCE_DIR/requirements-ai-worker.txt"
-cp "$SOURCE_DIR/ai_worker.py" "$INSTALL_DIR/ai_worker.py"
-chmod 600 "$INSTALL_DIR/ai_worker.py"
+cp "$SOURCE_DIR/ai_worker.py" "$SOURCE_DIR/set_symbol_model.py" "$INSTALL_DIR/"
+chmod 600 "$INSTALL_DIR/ai_worker.py" "$INSTALL_DIR/set_symbol_model.py"
 echo "MOSS AI packages installed at $INSTALL_DIR"
 echo "Next: configure MOSS_AI_WORKER_TOKEN, warm model weights, and run preflight."
 echo "To start in this shell: $INSTALL_DIR/venv/bin/python $INSTALL_DIR/ai_worker.py"
