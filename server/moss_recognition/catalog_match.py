@@ -92,20 +92,45 @@ class CatalogIndex:
         self.lock = Lock()
         self.stamp = None
         self.snapshot = None
+        self.set_aliases = {}
 
     def load(self):
         with self.lock:
             info = self.path.stat()
-            stamp = (info.st_ino, info.st_mtime_ns, info.st_size)
+            registry_path = self.path.parent / 'set-registry.json'
+            try:
+                registry_info = registry_path.stat()
+                registry_stamp = (registry_info.st_ino, registry_info.st_mtime_ns, registry_info.st_size)
+            except FileNotFoundError:
+                registry_stamp = None
+            stamp = (info.st_ino, info.st_mtime_ns, info.st_size, registry_stamp)
             if stamp != self.stamp:
                 with self.path.open(encoding='utf-8') as file:
                     data = json.load(file)
                 if data['algorithm'] != ALGORITHM or not data['cards']:
                     raise ValueError('Invalid recognition snapshot')
+                set_names = {}
+                aliases = {}
+                try:
+                    registry = json.loads(registry_path.read_text(encoding='utf-8'))
+                except (FileNotFoundError, json.JSONDecodeError):
+                    registry = {}
+                for set_row in registry.get('sets', []):
+                    code = str(set_row.get('code', '')).lower()
+                    name = set_row.get('name')
+                    if code and name:
+                        set_names[code] = name
+                        aliases[code] = code
+                    for field in ('mtgo_code', 'arena_code', 'parent_set_code'):
+                        alias = set_row.get(field)
+                        if isinstance(alias, str) and alias:
+                            aliases.setdefault(alias.lower(), code)
+                self.set_aliases = aliases
                 rows = []
                 for card in data['cards']:
                     identity = {key: card.get(key) for key in
                                 ('product_id', 'scryfall_id', 'name', 'set', 'collector_number')}
+                    identity['set_name'] = set_names.get(str(identity.get('set', '')).lower())
                     identity['finishes'] = card.get('finishes', [])
                     if 'routing' in card:
                         identity['routing'] = card['routing']
@@ -118,7 +143,7 @@ class CatalogIndex:
     def match(self, hashes, set_code=None, evidence=None):
         version, sets, rows, coverage = self.load()
         evidence = evidence or {}
-        stated_sets = {value for value in
+        stated_sets = {self.set_aliases.get(str(value).lower(), str(value).lower()) for value in
                        (set_code, evidence.get('set_abbreviation'), evidence.get('symbol_set')) if value}
         collector = evidence.get('collector_number')
         mark = evidence.get('foil_mark')
