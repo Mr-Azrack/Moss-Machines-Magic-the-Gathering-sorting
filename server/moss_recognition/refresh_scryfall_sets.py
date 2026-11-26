@@ -106,6 +106,13 @@ def sync_set_symbols(data_dir):
                 future.result()
             except Exception as exc:
                 failures.append((code, type(exc).__name__))
+    # Keep the old registry atomic if a changed icon could not be refreshed.
+    failed_codes = {code for code, _ in failures}
+    changed_failed = [row["code"] for row in clean
+                      if row["code"] in failed_codes
+                      and prior.get(row["code"], {}).get("icon_svg_uri") != row.get("icon_svg_uri")]
+    if changed_failed:
+        raise RuntimeError(f"Set symbol refresh incomplete; {len(changed_failed)} changed icons failed")
     # A failure is tolerated only when a previously cached icon still exists.
     missing = [row["code"] for row in clean
                if row.get("icon_file") and not (data_dir / row["icon_file"]).is_file()]
