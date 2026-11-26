@@ -13,6 +13,7 @@ import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from set_symbol_model import SetSymbolModel
 
 LANGS = r"EN|DE|ES|FR|IT|PT|JA|JP|KO|KR|RU|ZHS|ZHT|CS|CT|HE|LA|GRC|AR|SA|PH"
 SET = re.compile(rf"^([A-Z][A-Z0-9]{{1,7}})(?:\s*([★☆*•·∙])\s*|\s+)({LANGS})\b")
@@ -107,12 +108,14 @@ class PaddleFooterModel:
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False)
-        # Run one warm-up so the first physical card does not pay model startup cost.
+        self.symbol_model = SetSymbolModel()
+        # Warm both vision models so the first physical card avoids startup latency.
         self.predict(Image.new("RGB", (800, 1200), "white"))
         print("MOSS PaddleOCR warm-up complete", flush=True)
 
     def predict(self, image):
         import numpy as np
+        symbol = self.symbol_model.predict(image)
         votes = []
         for roi in footer_probes(image):
             results = self.model.predict(np.asarray(roi.convert("RGB")))
@@ -135,18 +138,18 @@ class PaddleFooterModel:
                 votes.append(evidence)
         if not votes:
             return {"engine": "paddleocr", "evidence": {},
-                    "review_reason": "no_unambiguous_footer_pair"}
+                    "review_reason": "no_unambiguous_footer_pair", "set_symbol": symbol}
         identities = {(row["set_abbreviation"], row["collector_number"]) for row in votes}
         if len(identities) != 1:
             return {"engine": "paddleocr", "evidence": {},
-                    "review_reason": "conflicting_footer_probes"}
+                    "review_reason": "conflicting_footer_probes", "set_symbol": symbol}
         set_code, number = next(iter(identities))
         evidence = {"set_abbreviation": set_code, "collector_number": number}
         marks = {row.get("foil_mark") for row in votes if row.get("foil_mark")}
         if len(marks) == 1:
             evidence["foil_mark"] = next(iter(marks))
         reason = "conflicting_foil_marks" if len(marks) > 1 else None
-        return {"engine": "paddleocr", "evidence": evidence, "review_reason": reason}
+        return {"engine": "paddleocr", "evidence": evidence, "review_reason": reason, "set_symbol": symbol}
 
 
 def make_handler(model, token):
@@ -171,7 +174,7 @@ def make_handler(model, token):
         def do_GET(self):
             if self.path != "/health":
                 return self.reply(404, {"error": "not_found"})
-            return self.reply(200, {"status": "ready", "engine": "paddleocr"})
+            return self.reply(200, {"status": "ready", "engine": "paddleocr", "set_symbol_model": True})
 
         def do_POST(self):
             if self.path != "/infer":
