@@ -98,10 +98,22 @@ def recognize_image(catalog, payload, *, worker=query_worker):
         evidence = parse_evidence(worker_result.get("evidence", {}))
     except (TypeError, ValueError):
         raise ImageRequestError(503, "ai_unavailable", "Invalid OCR worker evidence")
+    symbol = worker_result.get("set_symbol")
+    symbol_confidence = None
+    if isinstance(symbol, dict):
+        try:
+            parsed_symbol = parse_evidence({"symbol_set": symbol.get("set_code")})
+            symbol_confidence = float(symbol.get("confidence", 0))
+            if symbol_confidence >= float(os.environ.get("MOSS_SET_SYMBOL_MIN_CONFIDENCE", "0.82")):
+                evidence["symbol_set"] = parsed_symbol["symbol_set"]
+        except (TypeError, ValueError, KeyError):
+            symbol_confidence = None
     if worker_result.get("engine") != "paddleocr":
         raise ImageRequestError(503, "ai_unavailable", "Unexpected OCR worker response")
     evidence_meta = {"engine": "paddleocr", "evidence": evidence,
                      "review_reason": worker_result.get("review_reason")}
+    if symbol_confidence is not None:
+        evidence_meta["set_symbol_confidence"] = round(symbol_confidence, 4)
     image_hashes = tuple(int(part, 16) for part in fingerprint(image))
     if not evidence.get("set_abbreviation") or not evidence.get("collector_number"):
         # For old cards without modern footer codes, give the operator image
