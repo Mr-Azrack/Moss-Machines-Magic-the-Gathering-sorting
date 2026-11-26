@@ -15,6 +15,7 @@ class SetSymbolModel:
 
         self.np = np
         self.torch = torch
+        self.torch.set_num_threads(max(1, int(os.environ.get('MOSS_SET_MODEL_THREADS', '1'))))
         self.image_size = 64
         root = Path(model_dir or os.environ.get(
             "MOSS_SET_MODEL_DIR", "/opt/moss-ai/worker/models"))
