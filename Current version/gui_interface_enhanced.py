@@ -2571,6 +2571,10 @@ class ScannerGUI:
         # but all other commands require the matched firmware.
         if not self._firmware_verified and cmd not in ("QueryFirmware", "QuerySensors"):
             return None
+        if (self._moss_ai_shadow_mode()
+                and cmd not in ("QueryFirmware", "QuerySensors", "QueryParams")):
+            self.log_status("AI shadow mode blocked hardware command: " + str(cmd), error=True)
+            return None
         with self._arduino_tx_lock:
             try:
                 return self.scanner.send_to_arduino(cmd)
@@ -3019,6 +3023,24 @@ class ScannerGUI:
             msg, color = "Auto-Scan: OFFLINE RECOGNITION", '#4CAF50'
         self.scan_mode_label.configure(text=msg, fg=color)
 
+    def _moss_ai_shadow_mode(self):
+        """True only for the explicitly opt-in, no-motion AI validation mode."""
+        return (os.environ.get('MOSS_AI_SORTING_ENABLED') == '1'
+                and os.environ.get('MOSS_AI_SHADOW_MODE') == '1')
+
+    def _recognition_cycle_allowed(self):
+        """Allow shadow scans only with the sorter stopped and motion state certain."""
+        if not self._moss_ai_shadow_mode():
+            return self._sort_cycle_allowed_for_camera()
+        if (self._loading_motion_active or self._loading_position_uncertain
+                or self._loading_recovery_required or self.machine_parked_for_loading):
+            return False
+        if self._arduino_connected():
+            return (bool(self._firmware_verified)
+                    and not bool(self.machine_started)
+                    and self.sensor_data.get('started') == 0)
+        return True
+
     def _sort_cycle_allowed_for_camera(self):
         """No automatic scan, inventory write or tray command unless sorting is armed.
 
@@ -3076,7 +3098,7 @@ class ScannerGUI:
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 # Only start a scan if cooldown has passed and no scan in progress.
-                if (self.auto_scan and self._sort_cycle_allowed_for_camera()
+                if (self.auto_scan and self._recognition_cycle_allowed()
                         and (time.time() - self.last_scan_time) > self.scan_cooldown
                         and not getattr(self, '_scan_in_progress', False)):
                     # Show immediate UI feedback that scanning will occur
@@ -3215,11 +3237,13 @@ class ScannerGUI:
     
     def _perform_scan(self, frame, card_approx):
         """Scan card"""
-        if not self._sort_cycle_allowed_for_camera():
+        if not self._recognition_cycle_allowed():
             self.log_status("Scanner paused: machine stopped, parked or unverified", error=True)
             return
         try:
             scan_image_path = None
+            warped = None
+            shadow_mode = self._moss_ai_shadow_mode()
             try:
                 warped = self.scanner._get_perspective_corrected_card(frame, card_approx)
                 if warped is not None:
@@ -3230,7 +3254,7 @@ class ScannerGUI:
                         h, w = warped.shape[:2]
 
                     # Final sanity: vertical required
-                    if h > w:
+                    if h > w and not shadow_mode:
                         scans_dir = os.path.join('Collection', 'ScanImages')
                         os.makedirs(scans_dir, exist_ok=True)
                         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -3241,42 +3265,102 @@ class ScannerGUI:
             except Exception as _e:
                 scan_image_path = None
 
-            # A plugin may supply an OCR/recognition opinion, but it cannot
-            # bypass the built-in pHash + printing-identity safety gate.
+            hosted_required = os.environ.get('MOSS_AI_SORTING_ENABLED') == '1'
             plugin_info = None
-            if getattr(self, 'recognition_plugin', None):
+            review_path = False
+            if hosted_required and not getattr(self, 'recognition_plugin', None):
+                plugin_info = {"_moss_ai_status": "unavailable",
+                               "_moss_reason": "Hosted recognition plugin is not loaded"}
+            elif getattr(self, 'recognition_plugin', None):
                 try:
-                    plugin_info = self.recognition_plugin.recognize(frame, card_approx, self.scanner)
+                    plugin_info = self.recognition_plugin.recognize(
+                        frame, card_approx, self.scanner, warped)
                 except Exception as e:
-                    self.log_status(f"Recognition plugin error: {e}", error=True)
-                    self.log_error('E305', str(e))
+                    if hosted_required:
+                        plugin_info = {"_moss_ai_status": "unavailable",
+                                       "_moss_reason": f"Hosted recognition failed ({type(e).__name__})"}
+                    else:
+                        self.log_status(f"Recognition plugin error: {e}", error=True)
+                        self.log_error('E305', str(e))
 
-            card_info = self.scanner._process_card_from_contour(frame, card_approx)
+            plugin_status = plugin_info.get("_moss_ai_status") if isinstance(plugin_info, dict) else None
+            if hosted_required and plugin_status not in {"candidate", "review", "unavailable"}:
+                plugin_status = "unavailable"
+                plugin_info = {"_moss_ai_status": "unavailable",
+                               "_moss_reason": "Hosted recognizer returned no verified result"}
+            if hosted_required and plugin_status == "unavailable":
+                reason = plugin_info.get("_moss_reason") or "Hosted recognition is unavailable"
+                self.auto_scan = False
+                try:
+                    self.auto_scan_var.set(False)
+                except Exception:
+                    pass
+                self.detection_info = {"status": "hold",
+                                       "message": "Recognition unavailable; feeding paused",
+                                       "bin": "Hold"}
+                self.log_status("Recognition service unavailable; pausing the sorter: " + str(reason), error=True)
+                if (not shadow_mode and self._arduino_connected()
+                    and getattr(self, "machine_started", False)):
+                    self.root.after(0, self.stop_machine)
+                return
+
             reject_reason = getattr(self.scanner, 'last_identification_reject_reason', None)
-            if card_info and plugin_info:
-                if not isinstance(plugin_info, dict):
-                    reject_reason = 'recognition_plugin_invalid_response'
+            card_info = None
+            if hosted_required and plugin_status == "review":
+                review_path = True
+                reject_reason = plugin_info.get("_moss_reason") or "Hosted recognition needs review"
+            else:
+                card_info = self.scanner._process_card_from_contour(frame, card_approx)
+                if not isinstance(card_info, dict):
                     card_info = None
-                else:
-                    # A disagreement means we do not know which product is right.
-                    # Do NOT write inventory/history or command a normal tray.
-                    expected_id = str(card_info.get('product_id') or '')
-                    plugin_id = str(plugin_info.get('product_id') or plugin_info.get('UniqueID') or '')
-                    expected_set = str(card_info.get('set') or '').upper()
-                    plugin_set = str(plugin_info.get('set') or plugin_info.get('set_code') or '').upper()
-                    if not plugin_id or plugin_id != expected_id or (plugin_set and plugin_set != expected_set):
-                        reject_reason = 'recognition_plugin_disagrees'
+                if hosted_required and plugin_status == "candidate":
+                    hosted_card = {key: value for key, value in plugin_info.items()
+                                   if not key.startswith("_") and key not in {"_moss_ai_ms"}}
+                    if not hosted_card.get("printing_verified"):
                         card_info = None
+                        review_path = True
+                        reject_reason = "Hosted candidate failed the printing-verification gate"
+                    elif card_info:
+                        local_id = str(card_info.get("product_id") or card_info.get("UniqueID") or "")
+                        local_set = str(card_info.get("set") or card_info.get("set_code") or "").lower()
+                        local_number = str(card_info.get("number") or card_info.get("collector_number") or "").lower()
+                        if (local_id != hosted_card.get("product_id")
+                                or local_set != str(hosted_card.get("set") or "").lower()
+                                or local_number.lstrip("0") != str(hosted_card.get("number") or "").lower().lstrip("0")):
+                            card_info = None
+                            review_path = True
+                            reject_reason = "Hosted and local printing identities disagree"
+                        else:
+                            merged = dict(card_info)
+                            merged.update({key: value for key, value in hosted_card.items() if value is not None})
+                            card_info = merged
+                    else:
+                        card_info = hosted_card
+                elif card_info and plugin_info:
+                    if not isinstance(plugin_info, dict):
+                        reject_reason = 'recognition_plugin_invalid_response'
+                        card_info = None
+                    else:
+                        expected_id = str(card_info.get('product_id') or '')
+                        plugin_id = str(plugin_info.get('product_id') or plugin_info.get('UniqueID') or '')
+                        expected_set = str(card_info.get('set') or '').upper()
+                        plugin_set = str(plugin_info.get('set') or plugin_info.get('set_code') or '').upper()
+                        if not plugin_id or plugin_id != expected_id or (plugin_set and plugin_set != expected_set):
+                            reject_reason = 'recognition_plugin_disagrees'
+                            card_info = None
 
             if not card_info:
-                if not self._sort_cycle_allowed_for_camera():
-                    self.log_status("Discarded rejected recognition: sorter paused")
-                    return
                 reason = reject_reason or 'Identification inconclusive'
-                self.detection_info = {'status': 'reject', 'message': reason, 'bin': 'RejectCard'}
-                self.log_status(f"⊗ Card sent to reject: {reason}", error=True)
-                if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
-                    self._send_arduino("RejectCard")
+                if review_path or hosted_required:
+                    self._route_card_to_review(reason)
+                else:
+                    if not self._sort_cycle_allowed_for_camera():
+                        self.log_status("Discarded rejected recognition: sorter paused")
+                        return
+                    self.detection_info = {'status': 'reject', 'message': reason, 'bin': 'RejectCard'}
+                    self.log_status(f"⊗ Card sent to reject: {reason}", error=True)
+                    if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
+                        self._send_arduino("RejectCard")
                 return
 
             # Attach scan image path + backend to card_info for persistence
@@ -3310,12 +3394,26 @@ class ScannerGUI:
             except Exception:
                 pass
             
+            if hosted_required:
+                sorting_mode_check = self.sorting_var.get()
+                missing_route_data = (
+                    (sorting_mode_check == "color" and card_info.get("colors") is None)
+                    or (sorting_mode_check == "mana_value" and card_info.get("mana_value") is None)
+                    or (sorting_mode_check == "type" and not card_info.get("type"))
+                    or (sorting_mode_check == "rarity" and not card_info.get("rarity"))
+                    or (sorting_mode_check in {"price", "buy"} and card_info.get("market_price") is None)
+                    or (sorting_mode_check == "finish" and card_info.get("actual_finish") not in {"foil", "nonfoil"})
+                )
+                if missing_route_data:
+                    self._route_card_to_review("Required bin data is missing or the finish is unconfirmed")
+                    return
+
             # After OCR/pHash finishes, recheck that STOP or LOAD hasn't
             # invalidated this card. check_inventory() has write side effects.
-            if not self._sort_cycle_allowed_for_camera():
+            if not shadow_mode and not self._sort_cycle_allowed_for_camera():
                 self.log_status("Discarding stale recognition; sorter paused")
                 return
-            if self.scanner.track_inventory:
+            if self.scanner.track_inventory and not shadow_mode:
                 card_info = self.scanner.check_inventory(card_info)
                 if card_info == "RejectCard":
                     if not self._sort_cycle_allowed_for_camera():
@@ -3344,6 +3442,14 @@ class ScannerGUI:
             
             self.log_status(f"✓ {name} ({game}) {confidence:.1f}% → {bin_result}")
             
+            if shadow_mode:
+                self.detection_info = {
+                    'status': 'shadow', 'card': card_info,
+                    'bin': bin_result, 'sorting_mode': sorting_mode
+                }
+                self.log_status(f"AI SHADOW: {name} ({game}) → {bin_result}; no inventory or motion")
+                return
+
             # Even when an image was recognized, STOP/LOAD may have happened
             # while computing bins. Never send a tray command in that state.
             if not self._sort_cycle_allowed_for_camera():
@@ -3363,6 +3469,21 @@ class ScannerGUI:
         except Exception as e:
             self.log_error('E304', str(e))
     
+    def _route_card_to_review(self, reason):
+        """Use the existing reject chute as the operator review path."""
+        if self._moss_ai_shadow_mode():
+            self.detection_info = {"status": "review", "message": reason, "bin": "Review"}
+            self.log_status("AI shadow review: " + str(reason), error=True)
+            return
+        if not self._sort_cycle_allowed_for_camera():
+            self.detection_info = {"status": "review", "message": reason, "bin": "Review"}
+            self.log_status("Card held for review while the sorter is paused: " + str(reason), error=True)
+            return
+        self.detection_info = {"status": "review", "message": reason, "bin": "RejectCard"}
+        self.log_status("Card routed to review chute: " + str(reason), error=True)
+        if self._arduino_connected() and self._sort_cycle_allowed_for_camera():
+            self._send_arduino("RejectCard")
+
     def _draw_detection_info(self, frame, info):
         """Draw info on frame"""
         # Defensive: `info` may be None or may not contain all expected keys.
@@ -3372,7 +3493,7 @@ class ScannerGUI:
         status = info.get('status')
         bin_val = info.get('bin', None)
 
-        if status == 'success':
+        if status in {'success', 'shadow'}:
             card = info.get('card', {}) or {}
             y = 70
             cv2.putText(frame, f"Card: {card.get('name', 'Unknown')}", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -3405,7 +3526,9 @@ class ScannerGUI:
                 except Exception:
                     pass
             if bin_val is not None:
-                cv2.putText(frame, f"BIN: {bin_val}", (10, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+                label = "SHADOW BIN" if status == 'shadow' else "BIN"
+                color = (0, 255, 255) if status == 'shadow' else (0, 255, 0)
+                cv2.putText(frame, f"{label}: {bin_val}", (10, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
         else:
             msg = (info.get('message') or 'Error').upper()
             cv2.putText(frame, msg, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)

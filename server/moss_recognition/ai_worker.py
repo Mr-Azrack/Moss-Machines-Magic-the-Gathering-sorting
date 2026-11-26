@@ -1,0 +1,219 @@
+"""Private CPU-only PaddleOCR worker for printed MTG footer evidence.
+
+Never expose this service to the internet. Start on a dedicated Linux Python
+3.11/3.12 worker with installed PaddleOCR weights and bind to loopback.
+"""
+import base64
+import binascii
+import hmac
+import io
+import json
+import os
+import re
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from PIL import Image, ImageOps, UnidentifiedImageError
+from set_symbol_model import SetSymbolModel
+
+LANGS = r"EN|DE|ES|FR|IT|PT|JA|JP|KO|KR|RU|ZHS|ZHT|CS|CT|HE|LA|GRC|AR|SA|PH"
+SET = re.compile(rf"^([A-Z][A-Z0-9]{{1,7}})(?:\s*([★☆*•·∙])\s*|\s+)({LANGS})\b")
+NUMBER = re.compile(r"^(?:[CURMLST]\s+)?([0-9]{1,5}[A-Z]?)\s*(?:/\s*[0-9]{1,5})?(?:\s*[CURMLST])?\s*$")
+MARK = {"★": "star", "☆": "star", "*": "star", "•": "dot", "·": "dot", "∙": "dot"}
+MAX_BODY = 4 * 1024 * 1024
+
+
+def footer_evidence(lines):
+    """Require an adjacent collector-number / set-language pair, not arbitrary OCR."""
+    cleaned = [(str(text).upper().strip(), float(score)) for text, score in lines
+               if isinstance(text, str) and float(score) >= 0.72]
+    pairs = []
+    for index, (value, score) in enumerate(cleaned):
+        m = SET.match(value)
+        if m:
+            set_code, printed_mark = m.group(1).lower(), m.group(2)
+        else:
+            # Some card footers and OCR results fuse the set and language
+            # tokens into adjacent text (for example "SoSEnVincent").
+            compact = re.sub(r"\s+", "", value)
+            fused = []
+            for language in LANGS.split("|"):
+                start = compact.find(language)
+                if 2 <= start <= 8:
+                    prefix = compact[:start]
+                    if re.fullmatch(r"[A-Z][A-Z0-9]{1,7}", prefix):
+                        fused.append((start, prefix.lower()))
+            if not fused:
+                continue
+            earliest = min(start for start, _ in fused)
+            codes = {code for start, code in fused if start == earliest}
+            if len(codes) != 1:
+                continue
+            set_code, printed_mark = next(iter(codes)), None
+        for j in (index - 1, index + 1):
+            if not 0 <= j < len(cleaned):
+                continue
+            n = NUMBER.fullmatch(cleaned[j][0])
+            if n and min(score, cleaned[j][1]) >= 0.72:
+                number = n.group(1).lower().lstrip("0") or "0"
+                mark = MARK.get(printed_mark) if printed_mark and score >= 0.82 else None
+                pairs.append((set_code, number, mark))
+    ids = {(a, b) for a, b, _ in pairs}
+    if len(ids) != 1:
+        return {}, "no_unambiguous_footer_pair"
+    set_code, number = next(iter(ids))
+    evidence = {"set_abbreviation": set_code, "collector_number": number}
+    marks = {mark for _, _, mark in pairs if mark}
+    if len(marks) == 1:
+        evidence["foil_mark"] = next(iter(marks))
+    return evidence, None
+
+
+def prepare_footer_crop(image, box, target_width, *, binary=False):
+    footer = ImageOps.grayscale(image.crop(box))
+    scale = min(4.6, target_width / max(1, footer.width))
+    enlarged = ImageOps.autocontrast(
+        footer.resize((max(1, round(footer.width * scale)),
+                       max(1, round(footer.height * scale))), Image.Resampling.LANCZOS),
+        cutoff=1)
+    if binary:
+        enlarged = enlarged.point(lambda value: 255 if value >= 135 else 0)
+    return ImageOps.expand(enlarged, border=16, fill=0)
+
+
+def footer_probes(image):
+    image = ImageOps.exif_transpose(image)
+    if image.width > image.height:
+        image = image.transpose(Image.Transpose.ROTATE_90)
+    w, h = image.size
+    # Broad for standard catalog photos; tight gray and thresholded for the
+    # small physical MOSS footer. Only OCR results are retained, never the image.
+    broad = prepare_footer_crop(image, (0, round(h * 0.79), round(w * 0.64), h), 1150)
+    tight_box = (round(w * 0.015), round(h * 0.934), round(w * 0.22), h)
+    tight = prepare_footer_crop(image, tight_box, 680)
+    binary = prepare_footer_crop(image, tight_box, 680, binary=True)
+    return broad, tight, binary
+
+
+def crop_footer(image):
+    return footer_probes(image)[1]
+
+
+class PaddleFooterModel:
+    def __init__(self):
+        from paddleocr import PaddleOCR
+        self.model = PaddleOCR(
+            lang="en", device="cpu",
+            text_detection_model_name="PP-OCRv5_mobile_det",
+            text_recognition_model_name="en_PP-OCRv5_mobile_rec",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False)
+        self.symbol_model = SetSymbolModel()
+        # Warm both vision models so the first physical card avoids startup latency.
+        self.predict(Image.new("RGB", (800, 1200), "white"))
+        print("MOSS PaddleOCR warm-up complete", flush=True)
+
+    def predict(self, image):
+        import numpy as np
+        symbol = self.symbol_model.predict(image)
+        votes = []
+        for roi in footer_probes(image):
+            results = self.model.predict(np.asarray(roi.convert("RGB")))
+            lines = []
+            for item in results:
+                data = item.json
+                if "res" in data:
+                    data = data["res"]
+                for text, score, box in zip(data.get("rec_texts", []),
+                                            data.get("rec_scores", []),
+                                            data.get("rec_boxes", [])):
+                    try:
+                        y = (float(box[1]) + float(box[3])) / 2
+                    except (IndexError, TypeError, ValueError):
+                        continue
+                    lines.append((y, str(text), float(score)))
+            lines.sort(key=lambda item: item[0])
+            evidence, _ = footer_evidence([(text, score) for _, text, score in lines])
+            if evidence:
+                votes.append(evidence)
+        if not votes:
+            return {"engine": "paddleocr", "evidence": {},
+                    "review_reason": "no_unambiguous_footer_pair", "set_symbol": symbol}
+        identities = {(row["set_abbreviation"], row["collector_number"]) for row in votes}
+        if len(identities) != 1:
+            return {"engine": "paddleocr", "evidence": {},
+                    "review_reason": "conflicting_footer_probes", "set_symbol": symbol}
+        set_code, number = next(iter(identities))
+        evidence = {"set_abbreviation": set_code, "collector_number": number}
+        marks = {row.get("foil_mark") for row in votes if row.get("foil_mark")}
+        if len(marks) == 1:
+            evidence["foil_mark"] = next(iter(marks))
+        reason = "conflicting_foil_marks" if len(marks) > 1 else None
+        return {"engine": "paddleocr", "evidence": evidence, "review_reason": reason, "set_symbol": symbol}
+
+
+def make_handler(model, token):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            # No scan contents, credentials or images in logs.
+            pass
+
+        def reply(self, status, body):
+            out = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def authenticated(self):
+            return hmac.compare_digest(
+                self.headers.get("X-MOSS-Worker-Token", ""), token)
+
+        def do_GET(self):
+            if self.path != "/health":
+                return self.reply(404, {"error": "not_found"})
+            return self.reply(200, {"status": "ready", "engine": "paddleocr", "set_symbol_model": True})
+
+        def do_POST(self):
+            if self.path != "/infer":
+                return self.reply(404, {"error": "not_found"})
+            if not self.authenticated():
+                return self.reply(401, {"error": "unauthorized"})
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= MAX_BODY:
+                    return self.reply(413, {"error": "size_limit"})
+                obj = json.loads(self.rfile.read(length))
+                binary = base64.b64decode(obj["image_base64"], validate=True)
+                if not binary or len(binary) > 3 * 1024 * 1024:
+                    return self.reply(413, {"error": "size_limit"})
+                with Image.open(io.BytesIO(binary)) as image:
+                    if image.format not in ("JPEG", "PNG"):
+                        return self.reply(415, {"error": "unsupported_image"})
+                    if image.width * image.height > 9_000_000:
+                        return self.reply(413, {"error": "image_dimensions"})
+                    image.load()
+                    result = model.predict(image.convert("RGB"))
+                return self.reply(200, result)
+            except (KeyError, TypeError, ValueError, OSError, binascii.Error,
+                    UnidentifiedImageError):
+                return self.reply(400, {"error": "invalid_image"})
+            except Exception:
+                return self.reply(503, {"error": "model_inference_unavailable"})
+    return Handler
+
+
+def main():
+    token = os.environ.get("MOSS_AI_WORKER_TOKEN", "")
+    if len(token) < 32:
+        raise SystemExit("Set a strong MOSS_AI_WORKER_TOKEN first")
+    model = PaddleFooterModel()
+    with HTTPServer(("127.0.0.1", 8765), make_handler(model, token)) as server:
+        print("MOSS private OCR worker ready on loopback", flush=True)
+        server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

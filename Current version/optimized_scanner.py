@@ -642,33 +642,35 @@ class OptimizedCardScanner:
         return "RejectCard"
     
     def get_bin_finish(self, card_info):
-        """Get bin based on foil/nonfoil finish"""
-        # Check various foil field names across different games
+        """Get the bin for the observed finish of this physical card."""
+        # Hosted AI exposes the observed card finish separately from the
+        # catalog's list of finishes available for this printing.
+        if card_info.get("recognition_source") == "hosted_ai":
+            observed = str(card_info.get("actual_finish") or "").strip().lower()
+            if observed == "foil":
+                return "Foil"
+            if observed == "nonfoil":
+                return "Nonfoil"
+            return "Review"
+
+        # Preserve the legacy behavior for non-hosted recognizers.
         finishes = card_info.get("finishes") or card_info.get("finish") or []
         is_foil = card_info.get("foil") or card_info.get("isFoil") or False
-        
-        # Handle different data structures
         if isinstance(finishes, list):
             has_foil = any("foil" in str(f).lower() for f in finishes)
             has_nonfoil = any("nonfoil" in str(f).lower() or "normal" in str(f).lower() for f in finishes)
-            
             if has_foil and has_nonfoil:
                 return "Both"
-            elif has_foil:
+            if has_foil:
                 return "Foil"
-            elif has_nonfoil:
+            if has_nonfoil:
                 return "Nonfoil"
-        
-        # Simple boolean check
         if isinstance(is_foil, bool):
             return "Foil" if is_foil else "Nonfoil"
-        
-        # String check
         if isinstance(is_foil, str):
             return "Foil" if is_foil.lower() in ["true", "yes", "foil"] else "Nonfoil"
-        
-        return "Nonfoil"  # Default to nonfoil if unknown
-    
+        return "Nonfoil"  # Legacy non-hosted default
+
     def get_bin_number(self, card_info, mode, threshold=1000000):
         """
         Get bin number for card based on sorting mode
