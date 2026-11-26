@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 INCLUDE = (
     "server.py", "passenger_wsgi.py", "catalog_match.py", "ai_image_api.py",
-    "ai_worker.py", "ai_preflight.py", "benchmark_ai_worker.py",
+    "ai_worker.py", "set_symbol_model.py", "refresh_scryfall_sets.py",\n    "ai_preflight.py", "benchmark_ai_worker.py",
     "requirements.txt", "requirements-ai-worker.txt",
     "install_ai_worker.sh", "AI_DEPLOYMENT.md", "README.md",
     "export_verified_training.py",
