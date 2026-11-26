@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 from catalog_match import ALGORITHM, parse_hashes
 from refresh_catalog import TRACKING, USER_AGENT, get_json, image_hashes
+from refresh_scryfall_sets import sync_set_symbols
 
 SEED_URL = 'https://www.tcgtraders.app/recognition_data/phash_cards_1.db'
 MANIFEST_URL = 'https://api.scryfall.com/bulk-data'
@@ -322,6 +323,7 @@ def main():
         except BlockingIOError:
             print('Refresh already in progress', flush=True)
             return
+        sync_set_symbols(directory)
         refresh(directory, options.image_budget, backfill_all=options.backfill_all,
                 cached_source=options.cached_source)
 
