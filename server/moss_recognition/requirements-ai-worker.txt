@@ -1,4 +1,4 @@
-# Install CPU PaddlePaddle separately using official PaddlePaddle CPU index (see AI_DEPLOYMENT.md).
+# The installer adds CPU-only torch/torchvision and PaddlePaddle from their official indexes.
 paddleocr==3.3.1
 numpy>=1.26,<3
 Pillow>=10.4,<13
