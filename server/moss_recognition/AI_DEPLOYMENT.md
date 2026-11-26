@@ -37,6 +37,14 @@ Close every other app using the UC60 camera. Run `START_AI_CAMERA_TEST.cmd`, the
 - Check **false-accept rate per printing/finish**, recall, coverage by era, CPU/RAM usage, and p95 latency using physical card captures. Never assert an ML confidence score merely because a pHash candidate matched.
 - Only after a real-world review should the automatic sorter’s decision gate be changed. Outage must **pause feeding**, uncertain cards must go to review, and the original application must remain restorable.
 
+## Scan feedback loop
+
+- AI image scans are stored privately as **pending** review examples. New card candidates are sampled up to two approved examples per product ID; exact duplicate images are skipped. Unmatched captures are deduplicated by image hash.
+- Predictions never become labels automatically. An operator must verify the exact physical printing and approve it in the review center.
+- Approval adds the image and exact identity to the verified-example gallery. New AI matches can use that gallery for additional suggestions.
+- Each approval refreshes private `training/train.jsonl` and `training/validation.jsonl` manifests from approved examples only. This prepares data for a later measured training update; it does **not** replace model weights or trigger automatic retraining.
+- The current live store had 49 approved examples from four sets when this feedback loop was enabled. Those are reference examples, not a sufficiently broad retraining dataset.
+
 ## Training data
 `python export_verified_training.py --data-dir /private/moss_private_data --output-dir /private/moss_private_data/training`
 
