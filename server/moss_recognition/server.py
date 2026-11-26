@@ -363,6 +363,80 @@ class RecognitionApp:
             raise
         return self._json(start_response, 201, dict(base, scan_id=sid, state="pending"))
 
+    def _capture_training_example(self, environ, payload, outcome):
+        """Save one candidate scan for later operator confirmation, never as an automatic label."""
+        image_bytes, image_digest = decode_image(payload.get("image_base64"))
+        learned, _warning = self._suggestions(image_digest)
+        primary = outcome.get("candidate")
+        raw_rows = ([primary] if isinstance(primary, dict) else [])
+        supplied = outcome.get("suggestions")
+        if isinstance(supplied, list):
+            raw_rows.extend(supplied)
+        raw_rows.extend(learned)
+        merged, by_id = [], {}
+        for raw in raw_rows:
+            if not isinstance(raw, dict):
+                continue
+            product_id = clean_text(raw.get("product_id"), 128)
+            if not ID_RE.fullmatch(product_id):
+                continue
+            item = dict(raw)
+            if product_id in by_id:
+                by_id[product_id]["verified_example"] = True
+                continue
+            by_id[product_id] = item
+            merged.append(item)
+        outcome["suggestions"] = merged[:5]
+
+        candidates = candidate_list([
+            {"product_id": row.get("product_id"), "name": row.get("name"),
+             "set": row.get("set") or row.get("set_code"),
+             "collector_number": row.get("collector_number") or row.get("number"),
+             "distance": row.get("distance", row.get("dhash_distance", 0))}
+            for row in merged[:8]
+        ])
+        lead = outcome.get("candidate") or (merged[0] if merged else None)
+        lead_id = clean_text(lead.get("product_id"), 128) if isinstance(lead, dict) else ""
+        with self._connect() as db:
+            duplicate = db.execute("SELECT 1 FROM scans WHERE image_dhash=? LIMIT 1",
+                                   (image_digest,)).fetchone()
+            if duplicate:
+                return None
+            if lead_id and ID_RE.fullmatch(lead_id):
+                approved = db.execute(
+                    "SELECT COUNT(*) FROM verified_examples WHERE product_id=?", (lead_id,)
+                ).fetchone()[0]
+                if approved >= 2:
+                    return None
+                for row in db.execute("SELECT candidates_json FROM scans WHERE state IN ('pending','rejected')"):
+                    try:
+                        if any(str(item.get("product_id")) == lead_id
+                               for item in json.loads(row["candidates_json"])):
+                            return None
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+
+        scan_id = uuid.uuid4().hex
+        filename = scan_id + ".jpg"
+        destination = self.image_dir / filename
+        temporary = self.image_dir / (scan_id + ".tmp")
+        device_id = clean_text(environ.get("HTTP_X_MOSS_DEVICE_ID"), 80) or "moss-ai-recognition"
+        if not ID_RE.fullmatch(device_id):
+            device_id = "moss-ai-recognition"
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(image_bytes)
+            os.replace(temporary, destination)
+            with self._connect() as db:
+                db.execute("""INSERT INTO scans(id,created_at,device_id,image_file,image_dhash,candidates_json,state)
+                              VALUES(?,?,?,?,?,?,'pending')""",
+                           (scan_id, utc_now(), device_id, filename, image_digest, json.dumps(candidates)))
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            destination.unlink(missing_ok=True)
+            raise
+        return scan_id
+
     def _recognize_catalog(self, environ, start_response):
         try:
             length = int(environ.get("CONTENT_LENGTH", ""))
@@ -524,6 +598,13 @@ class RecognitionApp:
                 db.execute("UPDATE scans SET state='rejected',reviewed_at=?,review_note=? WHERE id=?", (utc_now(), note, sid))
             db.execute("INSERT INTO review_audit(scan_id,action,product_id,recorded_at,source_ip,note) VALUES(?,?,?,?,?,?)",
                        (sid, action, pid, utc_now(), ip, note))
+        try:
+            from export_verified_training import export_manifest
+            counts = export_manifest(self.data_dir, self.data_dir / "training")
+            print("MOSS_TRAINING_MANIFEST " + json.dumps(counts, separators=(",", ":")), flush=True)
+        except Exception:
+            import logging
+            logging.exception("MOSS verified training manifest refresh failed")
         return self._redirect(start_response, "/admin")
 
     def _image(self, start_response, sid):
@@ -556,7 +637,11 @@ class RecognitionApp:
                         raise RequestError(401, "unauthorized", "valid MOSS lookup credential required")
                     from ai_image_api import ImageRequestError, recognize_image
                     try:
-                        outcome = recognize_image(self.catalog, self._json_body(environ))
+                        payload = self._json_body(environ)
+                        outcome = recognize_image(self.catalog, payload)
+                        capture_id = self._capture_training_example(environ, payload, outcome)
+                        if capture_id:
+                            outcome["training_capture_id"] = capture_id
                     except ImageRequestError as exc:
                         raise RequestError(exc.status, exc.code, exc.message) from exc
                     return self._json(start_response, 200, outcome)
